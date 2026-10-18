@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=启动 SMPL-X T-pose 预览
+Comment=启动 SMPL-X 男性、女性和中性 T-pose 网页预览
+Exec=/home/hgc/project/AnimeAvatarGen/tools/start_smplx_tpose_viewer_desktop.sh
+Path=/home/hgc/project/AnimeAvatarGen
+Terminal=true
+Categories=Utility;
+Icon=applications-graphics
