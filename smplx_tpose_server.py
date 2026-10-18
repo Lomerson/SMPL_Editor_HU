@@ -55,21 +55,59 @@ const scene=new THREE.Scene(), camera=new THREE.PerspectiveCamera(38,1,.01,100);
 const controls=new OrbitControls(camera,renderer.domElement); controls.target.set(0,.82,0); controls.enableDamping=true; controls.minDistance=1.2; controls.maxDistance=10;
 scene.add(new THREE.HemisphereLight(0xddeaff,0x20242c,2.0)); const key=new THREE.DirectionalLight(0xffffff,2.1); key.position.set(3,5,4); scene.add(key);
 const grid=new THREE.GridHelper(8,16,0x4a596f,0x27303b); scene.add(grid); const axes=new THREE.AxesHelper(.45); axes.position.set(-2.5,.01,2.5); scene.add(axes);
-let meshRoot=null, skeletonRoot=null, selected=null, jointPickers=[], segmentLines=null, skeletonData=null, drag=null, selectedSegment=null;
+let meshRoot=null, skeletonRoot=null, selected=null, jointPickers=[], segmentLines=null, skeletonData=null, drag=null, selectedSegment=null, revision=0;
 const raycaster=new THREE.Raycaster(), pointer=new THREE.Vector2(), dragPlane=new THREE.Plane();
 function resize(){const r=canvas.getBoundingClientRect();renderer.setSize(r.width,r.height,false);camera.aspect=r.width/r.height;camera.updateProjectionMatrix()} addEventListener('resize',resize); resize();
 function render(){controls.update();renderer.render(scene,camera);requestAnimationFrame(render)} render();
 function setStatus(text,err=false){status.textContent=text;status.className=err?'error':''}
 function frame(root){const box=new THREE.Box3().setFromObject(root), c=box.getCenter(new THREE.Vector3()), s=box.getSize(new THREE.Vector3()); controls.target.set(c.x,c.y,c.z); camera.position.set(c.x,c.y+s.y*.10,c.z+s.y*2.05); controls.update();}
-function segmentEditor(){const host=document.querySelector('#segment-editor');if(selectedSegment===null||!skeletonData){host.className='segment-empty';host.textContent='点击一条黄色骨骼连线以编辑该骨段。';return}const child=selectedSegment,parent=skeletonData.parents[child],cfg=skeletonData.segments[String(child)]||{length:1,radii:[1,1,1]};const names=skeletonData.names;host.className='';host.innerHTML=`<p class="segment-name"><span class="selected-bone">${names[parent]} → ${names[child]}</span></p><div class="field"><span>长度</span><input id="seg-length" type="range" min="0.35" max="2.5" step="0.01" value="${cfg.length}"><span class="value" id="seg-length-value">${cfg.length.toFixed(2)}</span></div><div class="segment-tools"><span>横截面</span><select id="seg-count">${Array.from({length:11},(_,i)=>i+2).map(n=>`<option value="${n}" ${n===cfg.radii.length?'selected':''}>${n} 段</option>`).join('')}</select><button class="small" id="seg-reset">重置此段</button></div><div id="radius-fields"></div>`;const renderRadii=radii=>{const fields=document.querySelector('#radius-fields');fields.innerHTML=radii.map((v,i)=>`<div class="field"><span>${Math.round(i/(radii.length-1)*100)}%</span><input data-radius="${i}" type="range" min="0.3" max="2.5" step="0.01" value="${v}"><span class="value">${v.toFixed(2)}</span></div>`).join('');fields.querySelectorAll('input').forEach(x=>x.oninput=()=>x.nextElementSibling.textContent=Number(x.value).toFixed(2));};renderRadii(cfg.radii);const apply=()=>applySegment(child,Number(document.querySelector('#seg-length').value),[...document.querySelectorAll('[data-radius]')].map(x=>Number(x.value)));const length=document.querySelector('#seg-length');length.oninput=()=>document.querySelector('#seg-length-value').textContent=Number(length.value).toFixed(2);length.onchange=apply;document.querySelectorAll('[data-radius]').forEach(x=>x.onchange=apply);document.querySelector('#seg-count').onchange=e=>{const count=Number(e.target.value),old=[...document.querySelectorAll('[data-radius]')].map(x=>Number(x.value));const next=Array.from({length:count},(_,i)=>old[Math.min(old.length-1,Math.round(i/(count-1)*(old.length-1)))]);renderRadii(next);applySegment(child,Number(length.value),next)};document.querySelector('#seg-reset').onclick=()=>applySegment(child,1,Array(Number(document.querySelector('#seg-count').value)).fill(1));}
+function segmentEditor(){
+  const host=document.querySelector('#segment-editor');
+  if(selectedSegment===null||!skeletonData){host.className='segment-empty';host.textContent='点击一条黄色骨骼连线以编辑该骨段。';return;}
+  const child=selectedSegment,parent=skeletonData.parents[child];
+  const cfg=skeletonData.segments[String(child)]||{length:1,radii:[1,1,1]};
+  const names=skeletonData.names;
+  host.className='';
+  const lengthEnabled=(child===4||child===5||child===7||child===8||child===18||child===19||child===20||child===21);
+  const lengthControl=lengthEnabled?`<div class="field"><span>长度</span><input id="seg-length" type="range" min="0.50" max="1.80" step="0.01" value="${cfg.length}"><span class="value" id="seg-length-value">${cfg.length.toFixed(2)}</span></div>`:`<p class="sub">当前骨段仅支持横截面调整。</p>`;
+  host.innerHTML=`<p class="segment-name"><span class="selected-bone">${names[parent]} → ${names[child]}</span></p>${lengthControl}<div class="segment-tools"><span>横截面</span><select id="seg-count">${Array.from({length:11},(_,i)=>i+2).map(n=>`<option value="${n}" ${n===cfg.radii.length?'selected':''}>${n} 段</option>`).join('')}</select><button class="small" id="seg-reset">重置此段</button></div><div id="radius-fields"></div>`;
+  const renderRadii=(radii)=>{
+    const fields=document.querySelector('#radius-fields');
+    fields.innerHTML=radii.map((v,i)=>`<div class="field"><span>${Math.round(i/(radii.length-1)*100)}%</span><input data-radius="${i}" type="range" min="0.3" max="2.5" step="0.01" value="${v}"><span class="value">${v.toFixed(2)}</span></div>`).join('');
+    fields.querySelectorAll('input').forEach((input)=>{input.oninput=()=>{input.nextElementSibling.textContent=Number(input.value).toFixed(2);};input.onchange=()=>apply(currentRadii());});
+  };
+  const currentRadii=()=>[...document.querySelectorAll('[data-radius]')].map((input)=>Number(input.value));
+  const currentLength=()=>lengthEnabled?Number(document.querySelector('#seg-length').value):1;
+  const apply=(radii)=>applySegment(child,currentLength(),radii);
+  renderRadii(cfg.radii);
+  if(lengthEnabled){const length=document.querySelector('#seg-length');length.oninput=()=>{document.querySelector('#seg-length-value').textContent=Number(length.value).toFixed(2);};length.onchange=()=>apply(currentRadii());}
+  document.querySelector('#seg-count').onchange=(event)=>{
+    const count=Number(event.target.value),old=currentRadii();
+    const next=Array.from({length:count},(_,i)=>old[Math.min(old.length-1,Math.round(i/(count-1)*(old.length-1)))]);
+    renderRadii(next);apply(next);
+  };
+  document.querySelector('#seg-reset').onclick=async()=>{
+    setStatus('正在重置当前骨段...');
+    try{
+      const response=await fetch('/api/segment/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,child})});
+      if(!response.ok)throw Error(await response.text());
+      const result=await response.json();
+      if(!result.ok)throw Error('骨段重置未完成');
+      await load(selected,true,true);
+      selectedSegment=child;
+      segmentEditor();
+      setStatus('已重置当前骨段');
+    }catch(error){setStatus('骨段重置失败：'+error.message,true);}
+  };
+}
 async function applySegment(child,length,radii){setStatus('正在更新骨段 Mesh...');try{const r=await fetch('/api/segment',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,child,length,radii})});if(!r.ok)throw Error(await r.text());await load(selected,true,true);selectedSegment=child;segmentEditor()}catch(e){setStatus('骨段更新失败：'+e.message,true)}}
 function addSkeleton(data,groundOffset){if(skeletonRoot)scene.remove(skeletonRoot);skeletonData=data;skeletonRoot=new THREE.Group();skeletonRoot.position.y=groundOffset;jointPickers=[];const joints=data.joints.map(p=>new THREE.Vector3(...p));const points=[],children=[];for(let i=0;i<data.parents.length;i++){const parent=data.parents[i];if(parent>=0&&parent<joints.length){points.push(joints[parent],joints[i]);children.push(i)}}const lineGeometry=new THREE.BufferGeometry().setFromPoints(points);segmentLines=new THREE.LineSegments(lineGeometry,new THREE.LineBasicMaterial({color:0xffc64d,depthTest:false,depthWrite:false,transparent:true,opacity:1}));segmentLines.userData.children=children;segmentLines.renderOrder=2;skeletonRoot.add(segmentLines);const jointMat=new THREE.MeshBasicMaterial({color:0xfff0a6,depthTest:false,depthWrite:false});for(let i=0;i<joints.length;i++){const dot=new THREE.Mesh(new THREE.SphereGeometry(.006,6,4),jointMat);dot.position.copy(joints[i]);dot.renderOrder=3;dot.userData.joint=i;skeletonRoot.add(dot);if(i>0&&i<=21)jointPickers.push(dot);}scene.add(skeletonRoot);segmentEditor();}
-async function load(gender,edited=false,force=false){if(selected===gender&&!force)return;const shouldFrame=selected!==gender||!meshRoot;selected=gender;choices.value=gender;setStatus('正在加载 '+gender+' 模型...');try{const suffix=edited?'?edited=1':'';const [obj,skeleton]=await Promise.all([new OBJLoader().loadAsync('/api/model/'+gender+suffix),fetch('/api/skeleton/'+gender+suffix).then(r=>{if(!r.ok)throw Error('骨架数据读取失败');return r.json()})]);if(meshRoot)scene.remove(meshRoot);meshRoot=obj;obj.traverse(x=>{if(x.isMesh){x.geometry.computeVertexNormals();x.material=new THREE.MeshStandardMaterial({color:0x9ab7df,roughness:.72,metalness:.03,transparent:true,opacity:.42,depthWrite:false,side:THREE.DoubleSide});}});const groundOffset=.02-new THREE.Box3().setFromObject(obj).min.y;obj.position.y=groundOffset;scene.add(obj);addSkeleton(skeleton,groundOffset);if(shouldFrame)frame(obj);document.querySelector('#reset').disabled=false;setStatus('已加载 '+gender+'，可拖动黄色身体关节');}catch(e){setStatus('加载失败：'+e.message,true)}}
+async function load(gender,edited=false,force=false){if(selected===gender&&!force)return;const shouldFrame=selected!==gender||!meshRoot;selected=gender;choices.value=gender;setStatus('正在加载 '+gender+' 模型...');try{const suffix='?revision='+(++revision);const [obj,skeleton]=await Promise.all([new OBJLoader().loadAsync('/api/model/'+gender+suffix),fetch('/api/skeleton/'+gender+suffix,{cache:'no-store'}).then(r=>{if(!r.ok)throw Error('骨架数据读取失败');return r.json()})]);if(meshRoot)scene.remove(meshRoot);meshRoot=obj;obj.traverse(x=>{if(x.isMesh){x.geometry.computeVertexNormals();x.material=new THREE.MeshStandardMaterial({color:0x9ab7df,roughness:.72,metalness:.03,transparent:true,opacity:.42,depthWrite:false,side:THREE.DoubleSide});}});const groundOffset=.02-new THREE.Box3().setFromObject(obj).min.y;obj.position.y=groundOffset;scene.add(obj);addSkeleton(skeleton,groundOffset);if(shouldFrame)frame(obj);document.querySelector('#reset').disabled=false;setStatus('已加载 '+gender+'，可拖动黄色身体关节');}catch(e){setStatus('加载失败：'+e.message,true)}}
 function updatePointer(event){const r=canvas.getBoundingClientRect();pointer.set((event.clientX-r.left)/r.width*2-1,-((event.clientY-r.top)/r.height)*2+1);raycaster.setFromCamera(pointer,camera)}
 canvas.addEventListener('pointerdown',event=>{if(!selected)return;updatePointer(event);const hit=raycaster.intersectObjects(jointPickers,false)[0];if(hit){const joint=hit.object;drag={joint:joint.userData.joint,dot:joint};const worldPosition=joint.getWorldPosition(new THREE.Vector3());dragPlane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(new THREE.Vector3()),worldPosition);controls.enabled=false;canvas.setPointerCapture(event.pointerId);setStatus('拖动关节 '+drag.joint+'，松开后应用 '+(document.querySelector('#full-body-ik').checked?'全身 IK':'局部旋转'));event.preventDefault();return}if(segmentLines){raycaster.params.Line.threshold=.035;const lineHit=raycaster.intersectObject(segmentLines,false)[0];if(lineHit){const child=segmentLines.userData.children[Math.floor(lineHit.index/2)];if(child<=21){selectedSegment=child;segmentEditor();setStatus('已选择骨段 '+skeletonData.names[skeletonData.parents[child]]+' → '+skeletonData.names[child]);event.preventDefault()}}}});
 canvas.addEventListener('pointermove',event=>{if(!drag)return;updatePointer(event);const p=new THREE.Vector3();if(raycaster.ray.intersectPlane(dragPlane,p))drag.dot.position.copy(skeletonRoot.worldToLocal(p.clone()))});
 canvas.addEventListener('pointerup',async event=>{if(!drag)return;const moved=drag;drag=null;controls.enabled=true;canvas.releasePointerCapture(event.pointerId);const fullBody=document.querySelector('#full-body-ik').checked;setStatus('正在求解 '+(fullBody?'全身 IK...':'局部旋转...'));try{const r=await fetch('/api/pose',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,joint:moved.joint,target:moved.dot.position.toArray(),full_body:fullBody})});if(!r.ok)throw Error(await r.text());await r.json();await load(selected,true,true)}catch(e){setStatus('IK 求解失败：'+e.message,true);await load(selected,true,true)}});
-document.querySelector('#reset').onclick=async()=>{if(!selected)return;await fetch('/api/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected})});await load(selected,true,true)};
+document.querySelector('#reset').onclick=async()=>{if(!selected)return;const button=document.querySelector('#reset');button.disabled=true;setStatus('正在重置当前姿态...');try{const response=await fetch('/api/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected})});if(!response.ok)throw Error(await response.text());const result=await response.json();if(!result.ok)throw Error('重置未完成');selectedSegment=null;await load(selected,true,true);setStatus('已重置为默认 SMPL-X 姿态');}catch(error){setStatus('重置失败：'+error.message,true);button.disabled=false;}};
 async function init(){const r=await fetch('/api/models');if(!r.ok)throw Error('无法读取模型信息');const data=await r.json();for(const item of data.models){const option=document.createElement('option');option.value=item.gender;option.textContent=item.label+(item.available?'':'（未安装）');option.disabled=!item.available;choices.append(option)}choices.onchange=()=>load(choices.value,true);const first=data.models.find(x=>x.available);if(first)load(first.gender,true);else setStatus('未找到可用 SMPL-X 模型文件',true)}
 init().catch(e=>setStatus(e.message,true));
 </script></body></html>"""
@@ -140,43 +178,146 @@ class ModelCache:
         parents = model.parents.cpu().numpy().astype(np.int32)
         joints = base_joints.copy()
         segments = self._segments(gender)
+        # No segment edits must mean the exact, unmodified SMPL-X output.
+        # This avoids even harmless numerical drift in the canonical T-pose.
+        if not segments:
+            result = (model, base_vertices, joints, parents)
+            self.geometry_cache[gender] = result
+            return result
         for child in range(1, len(parents)):
             parent = int(parents[child])
             if parent < 0:
                 continue
-            config = segments.get(str(child), {})
-            scale = float(config.get("length", 1.0))
-            joints[child] = joints[parent] + (base_joints[child] - base_joints[parent]) * scale
+            factor = float(segments.get(str(child), {}).get("length", 1.0))
+            joints[child] = joints[parent] + (base_joints[child] - base_joints[parent]) * factor
+
         vertices = base_vertices.copy()
-        deltas = joints - base_joints
         weights = model.lbs_weights.detach().cpu().numpy().astype(np.float32)
-        vertices += weights[:, :len(joints)] @ deltas
+        dominant_joint = np.argmax(weights[:, :len(joints)], axis=1)
+        body_children = [index for index in range(1, 22) if parents[index] >= 0]
+        nearest_distance = np.full(len(base_vertices), np.inf, dtype=np.float32)
+        nearest_segment = np.full(len(base_vertices), -1, dtype=np.int32)
+        for candidate in body_children:
+            parent = int(parents[candidate])
+            start, end = base_joints[parent], base_joints[candidate]
+            vector = end - start
+            length_sq = float(vector @ vector)
+            if length_sq < 1e-10:
+                continue
+            relative = base_vertices - start
+            t0 = np.clip((relative @ vector) / length_sq, 0.0, 1.0)
+            distance_sq = ((base_vertices - (start + t0[:, None] * vector)) ** 2).sum(axis=1)
+            replace = distance_sq < nearest_distance
+            nearest_distance[replace] = distance_sq[replace]
+            nearest_segment[replace] = candidate
+
+        def descendants(root: int) -> set[int]:
+            result = {root}
+            changed = True
+            while changed:
+                changed = False
+                for index, parent in enumerate(parents):
+                    if parent in result and index not in result:
+                        result.add(index)
+                        changed = True
+            return result
+
         for child_text, config in segments.items():
             child = int(child_text)
             parent = int(parents[child])
             if child > 21 or parent < 0:
                 continue
-            start, end = joints[parent], joints[child]
-            axis = end - start
-            axis_norm = float(np.linalg.norm(axis))
-            if axis_norm < 1e-6:
+            start0, end0 = base_joints[parent], base_joints[child]
+            axis0 = end0 - start0
+            base_length = float(np.linalg.norm(axis0))
+            if base_length < 1e-6:
                 continue
-            axis /= axis_norm
-            relative = vertices - start
-            raw_t = relative @ axis / axis_norm
-            # A profile belongs to a finite bone segment. Do not clamp every
-            # downstream vertex to t=1: that would leak the distal radius into
-            # the next limb segment. A small feather keeps the joint seam smooth.
+            axis0 /= base_length
+            relative0 = base_vertices - start0
+            raw_t = relative0 @ axis0 / base_length
             feather = 0.08
             t = np.clip(raw_t, 0.0, 1.0)
             axial_mask = np.clip((raw_t + feather) / feather, 0.0, 1.0)
             axial_mask *= np.clip((1.0 + feather - raw_t) / feather, 0.0, 1.0)
+            segment_owner = (nearest_segment == child).astype(np.float32) * axial_mask
+            if child in (18, 19):
+                # Upper-arm seams share vertices with torso and forearm. Gate
+                # the continuous upper-arm deformation by this side's
+                # shoulder+elbow weights so torso surface cannot be pulled
+                # into the arm, and so the distal forearm remains a child
+                # branch that translates with the elbow.
+                if child == 18:
+                    arm_weight = weights[:, 16] + weights[:, 18]
+                    neighbor_weight = weights[:, 13] + weights[:, 20]
+                else:
+                    arm_weight = weights[:, 17] + weights[:, 19]
+                    neighbor_weight = weights[:, 14] + weights[:, 21]
+                upper_surface = (arm_weight > 0.03) & (arm_weight >= neighbor_weight * 0.55) & (raw_t <= 1.0)
+                segment_owner = upper_surface.astype(np.float32) * axial_mask
+            if child in (7, 8):
+                # At the ankle seam, nearest-bone classification leaves some
+                # genuine shin vertices assigned to thigh/foot. Use the local
+                # SMPL-X knee+ankle weights, constrained against neighboring
+                # same-side weights, so the opposite calf stays untouched.
+                if child == 7:
+                    calf_weight = weights[:, 4] + weights[:, 7]
+                    neighbor_weight = weights[:, 1] + weights[:, 10]
+                else:
+                    calf_weight = weights[:, 5] + weights[:, 8]
+                    neighbor_weight = weights[:, 2] + weights[:, 11]
+                calf_surface = (calf_weight > 0.03) & (calf_weight >= neighbor_weight * 0.55) & (raw_t <= 1.0)
+                segment_owner = calf_surface.astype(np.float32) * axial_mask
+            # Use this link's local length change only. The absolute child
+            # displacement also includes every ancestor's edit (for example a
+            # shortened thigh moves the knee). Applying that absolute value to
+            # a calf again double-counted the thigh deformation and separated
+            # the mesh from its correctly-recursed skeleton.
+            delta = (joints[child] - joints[parent]) - (base_joints[child] - base_joints[parent])
+            desired_translation = t[:, None] * delta
+            if child in (18, 19):
+                # Keep a short shoulder-side attachment band fixed so the
+                # torso-to-upper-arm seam does not cave in during resizing.
+                shoulder_guard = 0.12
+                upper_t = np.clip((t - shoulder_guard) / (1.0 - shoulder_guard), 0.0, 1.0)
+                desired_translation = upper_t[:, None] * delta
+            if child in (20, 21):
+                # Weld the distal forearm to the rigidly translated hand. The
+                # final wrist band transitions from axial scaling to the full
+                # wrist displacement, preventing a fold across shared seam
+                # triangles while preserving the forearm's main length edit.
+                seam = np.clip((t - 0.78) / 0.22, 0.0, 1.0)
+                seam = seam * seam * (3.0 - 2.0 * seam)
+                desired_translation = (t + (1.0 - t) * seam)[:, None] * delta
+            subtree = descendants(child)
+            downstream_segments = list((subtree - {child}) & set(body_children))
+            is_branch = np.isin(nearest_segment, downstream_segments)
+            is_branch |= np.isin(dominant_joint, list(subtree)) & (raw_t > 1.0)
+            rigid_hand = np.zeros(len(vertices), dtype=bool)
+            rigid_forearm = np.zeros(len(vertices), dtype=bool)
+            if child == 18:
+                rigid_forearm = (weights[:, 18] + weights[:, 20] > 0.03) & (raw_t > 0.92)
+            elif child == 19:
+                rigid_forearm = (weights[:, 19] + weights[:, 21] > 0.03) & (raw_t > 0.92)
+            if child in (20, 21):
+                rigid_hand = np.isin(dominant_joint, list(subtree))
+            downstream = (is_branch & (raw_t > 1.0)) | rigid_hand | rigid_forearm
+            vertices[downstream] += delta
+            segment_owner[rigid_hand] = 0.0
+            segment_owner[rigid_forearm] = 0.0
+            vertices += desired_translation * segment_owner[:, None]
+
+            start, end = joints[parent], joints[child]
+            axis = end - start
+            length = float(np.linalg.norm(axis))
+            if length < 1e-6:
+                continue
+            axis /= length
+            relative = vertices - start
             radial = relative - np.outer(relative @ axis, axis)
             radii = np.asarray(config.get("radii", [1.0, 1.0, 1.0]), dtype=np.float32)
-            profile_t = np.linspace(0.0, 1.0, len(radii), dtype=np.float32)
-            scale = np.interp(t, profile_t, radii).astype(np.float32)
-            influence = np.clip(weights[:, parent] + weights[:, child], 0.0, 1.0) * axial_mask
-            vertices += radial * ((scale - 1.0) * influence)[:, None]
+            scale = np.interp(t, np.linspace(0.0, 1.0, len(radii)), radii).astype(np.float32)
+            vertices += radial * ((scale - 1.0) * segment_owner)[:, None]
+
         result = (model, vertices, joints, parents)
         self.geometry_cache[gender] = result
         return result
@@ -218,12 +359,26 @@ class ModelCache:
     def update_segment(self, gender: str, child: int, length: float, radii: list[float]):
         if gender not in GENDERS or not self.available(gender):
             raise FileNotFoundError(gender)
-        if child < 1 or child > 21 or not 0.35 <= length <= 2.5:
-            raise ValueError("Invalid body segment or length")
+        if child < 1 or child > 21:
+            raise ValueError("Invalid body segment")
+        if child not in (4, 5, 7, 8, 18, 19, 20, 21) and abs(length - 1.0) > 1e-6:
+            raise ValueError("Length editing is currently available only for limbs")
         if not 2 <= len(radii) <= 12 or any(not 0.3 <= value <= 2.5 for value in radii):
             raise ValueError("Radius controls must contain 2-12 values between 0.3 and 2.5")
         with self.lock:
-            self._segments(gender)[str(child)] = {"length": float(length), "radii": [float(value) for value in radii]}
+            self._segments(gender)[str(child)] = {
+                "length": float(length) if child in (4, 5, 7, 8, 18, 19, 20, 21) else 1.0,
+                "radii": [float(value) for value in radii],
+            }
+            self._invalidate_geometry(gender)
+
+    def reset_segment(self, gender: str, child: int):
+        if gender not in GENDERS or not self.available(gender):
+            raise FileNotFoundError(gender)
+        if child < 1 or child > 21:
+            raise ValueError("Invalid body segment")
+        with self.lock:
+            self._segments(gender).pop(str(child), None)
             self._invalidate_geometry(gender)
 
     def reset(self, gender: str):
@@ -233,6 +388,7 @@ class ModelCache:
             model = self._model(gender)
             import torch
             self.poses[gender] = torch.zeros((1, model.NUM_BODY_JOINTS * 3), dtype=torch.float32)
+            self.segment_configs.pop(gender, None)
             self.outputs.pop(gender, None)
             self._invalidate_geometry(gender)
 
@@ -295,6 +451,7 @@ def handler_factory(cache: ModelCache):
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store, max-age=0")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -305,6 +462,7 @@ def handler_factory(cache: ModelCache):
                 body = HTML.encode("utf-8")
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store, max-age=0")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -325,6 +483,7 @@ def handler_factory(cache: ModelCache):
                 data = model_path.read_bytes()
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Cache-Control", "no-store, max-age=0")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
@@ -372,6 +531,10 @@ def handler_factory(cache: ModelCache):
                         float(data["length"]),
                         [float(value) for value in radii],
                     )
+                    self.send_json({"ok": True})
+                    return
+                if path == "/api/segment/reset":
+                    cache.reset_segment(gender, int(data["child"]))
                     self.send_json({"ok": True})
                     return
                 self.send_error(HTTPStatus.NOT_FOUND)
