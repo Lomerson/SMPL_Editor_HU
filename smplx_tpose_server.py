@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Interactive SMPL-X T-pose viewer with automatic gender-model discovery."""
+"""Interactive SMPL-X T-pose viewer with automatic gender-model discovery.
+
+Inference runs on CUDA when a working GPU is detected at startup, and falls
+back to the original CPU path otherwise (see :func:`resolve_device`).
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import sys
 import tempfile
 import threading
 import numpy as np
@@ -23,10 +28,20 @@ HTML = r"""<!doctype html>
 <style>
   :root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; }
   * { box-sizing: border-box; } html,body,#app { margin:0; width:100%; height:100%; overflow:hidden; }
-  body { background:#111318; color:#edf0f5; } #app { display:grid; grid-template-columns:300px minmax(0,1fr); }
+  body { background:#111318; color:#edf0f5; } #app { display:grid; grid-template-columns:300px minmax(0,1fr); grid-template-rows:100%; }
+  /* the console scrolls on its own so a growing panel never resizes the canvas */
+  aside { overflow-y:auto; min-height:0; }
   aside { background:#1a1e25; border-right:1px solid #303642; padding:24px 18px; display:flex; flex-direction:column; gap:22px; }
   h1 { font-size:18px; margin:0; } .sub { color:#aeb7c6; font-size:13px; line-height:1.55; margin:8px 0 0; }
-  .section-title { display:block; color:#f4f6fa; font-size:16px; font-weight:700; margin:0 0 10px; } select { width:100%; min-height:43px; border:1px solid #414957; border-radius:6px; background:#252b35; color:#eff2f7; padding:0 11px; font-size:14px; cursor:pointer; }
+  .section-title { display:block; color:#f4f6fa; font-size:16px; font-weight:700; margin:0; }
+  .panel { border:1px solid #2b313c; border-radius:8px; background:#171b22; padding:0 12px 12px; }
+  .panel > summary { list-style:none; cursor:pointer; user-select:none; padding:12px 0 10px; display:flex; align-items:center; justify-content:space-between; }
+  .panel > summary::-webkit-details-marker { display:none; }
+  .panel > summary::after { content:'\25BE'; color:#8f99a9; font-size:11px; transition:transform .15s ease; }
+  .panel:not([open]) > summary::after { transform:rotate(-90deg); }
+  .panel[open] > summary { margin-bottom:10px; }
+  .panel:not([open]) { padding-bottom:0; }
+  .brand h1 { margin:0; } select { width:100%; min-height:43px; border:1px solid #414957; border-radius:6px; background:#252b35; color:#eff2f7; padding:0 11px; font-size:14px; cursor:pointer; }
   button { border:1px solid #414957; border-radius:6px; background:#252b35; color:#eff2f7; min-height:43px; padding:0 12px; font-size:14px; text-align:left; cursor:pointer; }
   button:hover:not(:disabled) { border-color:#7da6ef; background:#293544; } button.active { color:#fff; background:#24559a; border-color:#70a5f3; }
   button:disabled { color:#697383; cursor:not-allowed; } #status { margin-top:auto; color:#aeb7c6; font-size:12px; line-height:1.55; }
@@ -34,21 +49,21 @@ HTML = r"""<!doctype html>
   .hud { position:absolute; top:18px; right:18px; background:#1a1e25e8; border:1px solid #343b47; border-radius:6px; padding:11px 13px; color:#b9c2d0; font-size:12px; line-height:1.55; }
   .pose-controls { display:flex; gap:8px; align-items:stretch; } .toggle { display:flex; align-items:center; gap:7px; min-height:38px; flex:1; padding:0 10px; border:1px solid #414957; border-radius:6px; background:#252b35; font-size:14px; cursor:pointer; white-space:nowrap; } .toggle input { width:16px; height:16px; accent-color:#70a5f3; } #reset { min-height:38px; padding:0 10px; font-size:13px; white-space:nowrap; }
   .segment-empty { color:#8f99a9; font-size:13px; } .segment-name { color:#d9e5f8; font-size:13px; margin:0 0 10px; } .field { display:grid; grid-template-columns:62px minmax(0,1fr) 48px; gap:7px; align-items:center; margin:8px 0; font-size:12px; color:#b9c3d0; } input[type=range] { width:100%; accent-color:#70a5f3; } .value { color:#f1f4f8; text-align:right; font-variant-numeric:tabular-nums; } .segment-tools { display:flex; gap:8px; align-items:center; margin:10px 0 4px; } .segment-tools select { flex:1; min-height:34px; font-size:13px; } .small { min-height:34px; padding:0 10px; font-size:12px; } .selected-bone { color:#fff1b3; }
-  .error { color:#ffabb8 !important; } @media(max-width:700px) { #app{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)} aside{padding:14px; border-right:0; border-bottom:1px solid #303642; gap:12px}.gender{grid-template-columns:repeat(3,1fr)} button{font-size:12px;text-align:center} #status{margin-top:0} }
+  .error { color:#ffabb8 !important; } .ref-row { display:flex; gap:8px; align-items:stretch; } #ref-pick { flex:1 1 auto; min-width:0; text-align:center; } #ref-hide, #ref-clear { flex:0 0 62px; min-width:62px; text-align:center; } #ref-file { display:none; } .ref-info { margin:8px 0 0; } @media(max-width:700px) { #app{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)} aside{padding:14px; border-right:0; border-bottom:1px solid #303642; gap:12px}.gender{grid-template-columns:repeat(3,1fr)} button{font-size:12px;text-align:center} #status{margin-top:0} }
 </style>
 </head>
 <body><div id="app"><aside>
   <div><h1>SMPL-X T-pose</h1><p class="sub">选择性别模型。鼠标左键旋转，滚轮缩放，右键平移。</p></div>
-  <div><span class="section-title">人体模型</span><select id="gender" aria-label="人体模型"></select></div>
-  <div><span class="section-title">调整人体姿态</span><div class="pose-controls"><label class="toggle"><input id="full-body-ik" type="checkbox"> <span>全身 IK</span></label><button id="reset" disabled>重置当前姿态</button></div><p class="sub">关闭时移动所选点及其子节点，父节点保持固定；开启后允许整条父链共同求解。</p></div>
-  <div><span class="section-title">骨段编辑</span><div id="segment-editor" class="segment-empty">点击一条黄色骨骼连线以编辑该骨段。</div></div>
+  <details class="panel" open><summary class="section-title">人体模型</summary><select id="gender" aria-label="人体模型"></select></details>
+  <details class="panel" open><summary class="section-title">调整人体姿态</summary><div class="pose-controls"><label class="toggle"><input id="full-body-ik" type="checkbox"> <span>全身 IK</span></label><button id="reset" disabled>重置当前姿态</button></div><p class="sub">关闭时移动所选点及其子节点，父节点保持固定；开启后允许整条父链共同求解。</p></details>
+  <details class="panel" open><summary class="section-title">骨段编辑</summary><div id="segment-editor" class="segment-empty">点击一条黄色骨骼连线以编辑该骨段。</div></details>
+  <details class="panel" open><summary class="section-title">参考图</summary><div class="ref-row"><button id="ref-pick">选择图片</button><button id="ref-hide" class="small" disabled>隐藏</button><button id="ref-clear" class="small" disabled>移除</button></div><input id="ref-file" type="file" accept="image/png,image/jpeg,image/jpg,image/webp,image/bmp,image/gif,image/tiff,image/*"><p class="sub ref-info" id="ref-info">未选择图片。上传后自动用 AnimePoseDetector 对齐双眼。</p></details>
   <div id="status">正在读取模型信息...</div>
 </aside><main><canvas id="viewer"></canvas><div class="hud">点击黄色身体关节后拖动<br>空白处拖动旋转 · 滚轮缩放</div></main></div>
 <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"}}</script>
 <script type="module">
 import * as THREE from 'three';
 import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
-import {OBJLoader} from 'three/addons/loaders/OBJLoader.js';
 const canvas=document.querySelector('#viewer'), status=document.querySelector('#status'), choices=document.querySelector('#gender');
 const renderer=new THREE.WebGLRenderer({canvas,antialias:true}); renderer.setPixelRatio(Math.min(devicePixelRatio,2)); renderer.setClearColor(0x111318);
 const scene=new THREE.Scene(), camera=new THREE.PerspectiveCamera(38,1,.01,100); camera.position.set(3.2,1.7,5.6);
@@ -61,9 +76,126 @@ function resize(){const r=canvas.getBoundingClientRect();renderer.setSize(r.widt
 function render(){controls.update();renderer.render(scene,camera);requestAnimationFrame(render)} render();
 function setStatus(text,err=false){status.textContent=text;status.className=err?'error':''}
 function frame(root){const box=new THREE.Box3().setFromObject(root), c=box.getCenter(new THREE.Vector3()), s=box.getSize(new THREE.Vector3()); controls.target.set(c.x,c.y,c.z); camera.position.set(c.x,c.y+s.y*.10,c.z+s.y*2.05); controls.update();}
+// ---------------------------- reference picture ----------------------------
+// The picture lives in the xy plane.  AnimePoseDetector reports the eye
+// midpoint in picture pixels plus a pixels-per-metre scale, so the plane is
+// sized to human scale and translated until the picture's eye midpoint lands on
+// the model's eye midpoint (SMPL-X joints 23/24).  The model is never edited.
+let referenceRoot=null, referencePlane=null, referenceLayout=null, referenceURL=null;
+let referenceHidden=false, referenceStatus='', groundOffset=0;
+const EYE_LEFT_JOINT=23, EYE_RIGHT_JOINT=24;
+function refreshReferenceInfo(){
+  const info=document.querySelector('#ref-info');
+  if(!info)return;
+  if(!referenceRoot){info.textContent='未选择图片。上传后自动用 AnimePoseDetector 对齐双眼。';return;}
+  const bits=[];
+  if(referenceLayout){
+    const L=referenceLayout;
+    bits.push(`${L.label} · ${L.imgW}×${L.imgH} px · ${L.pxPerM.toFixed(1)} px/m`);
+    if(referenceStatus)bits.push(referenceStatus);
+  }else{
+    bits.push('未检测到双眼，按 1 px = 1 mm 放在模型中心');
+  }
+  if(referenceHidden)bits.push('已隐藏');
+  info.textContent=bits.join(' · ');
+}
+function updateReferenceButtons(){
+  const hide=document.querySelector('#ref-hide'), clear=document.querySelector('#ref-clear');
+  const has=!!referencePlane;
+  if(hide){hide.disabled=!has;hide.classList.toggle('active',has&&referenceHidden);}
+  if(clear)clear.disabled=!has;
+}
+function modelEyeWorld(){
+  if(!skeletonData||!skeletonData.joints||skeletonData.joints.length<=EYE_RIGHT_JOINT)return null;
+  const a=skeletonData.joints[EYE_LEFT_JOINT], b=skeletonData.joints[EYE_RIGHT_JOINT];
+  return new THREE.Vector3((a[0]+b[0])/2,(a[1]+b[1])/2+groundOffset,(a[2]+b[2])/2);
+}
+function alignReference(){
+  if(!referenceRoot||!referencePlane||!referenceLayout)return null;
+  const eye=modelEyeWorld();
+  if(!eye)return null;
+  const L=referenceLayout, mpp=1/L.pxPerM;
+  const localX=(L.eyePx[0]-L.imgW/2)*mpp;
+  const localY=(L.imgH/2-L.eyePx[1])*mpp;
+  // The plane keeps its XY orientation (no rotation at all); it is translated
+  // along z as well so the picture's eye midpoint and the model's eye midpoint
+  // coincide in 3D, not just in the projection.
+  referencePlane.position.set(eye.x-localX,eye.y-localY, 0);
+  referenceRoot.updateMatrixWorld(true);
+  const probe=referencePlane.localToWorld(new THREE.Vector3(localX,localY,0));
+  // the picture is pinned to the xy plane, so only the in-plane offset can be
+  // driven to zero -- compare in xy, not in 3D (the eyes sit ~6 cm in front).
+  return Math.hypot(probe.x-eye.x,probe.y-eye.y);
+}
+function realignReference(){
+  if(!referenceRoot||!referenceLayout)return;
+  const err=alignReference();
+  if(err!==null)referenceStatus=`双眼对齐误差 ${(err*1000).toFixed(4)} mm（xy 平面内）`;
+  refreshReferenceInfo();
+}
+function disposeReference(){
+  if(referenceRoot){
+    referenceRoot.traverse((object)=>{if(object.isMesh){object.geometry.dispose();if(object.material.map)object.material.map.dispose();object.material.dispose();}});
+    scene.remove(referenceRoot);
+  }
+  if(referenceURL){URL.revokeObjectURL(referenceURL);referenceURL=null;}
+  referenceRoot=null;referencePlane=null;referenceLayout=null;
+  referenceHidden=false;referenceStatus='';
+}
+function clearReference(){
+  disposeReference();
+  refreshReferenceInfo();
+  updateReferenceButtons();
+}
+async function showReferenceFile(file){
+  const name=file.name||'image';
+  if(!/^image\//.test(file.type)&&!/\.(png|jpe?g|webp|bmp|gif|tiff?)$/i.test(name)){setStatus('不支持的图片格式：'+(file.type||name),true);return;}
+  setStatus('正在用 AnimePoseDetector 分析参考图 '+name+' ...');
+  const url=URL.createObjectURL(file);
+  let image;
+  try{
+    image=await new Promise((resolve,reject)=>{const img=new Image();img.onload=()=>resolve(img);img.onerror=()=>reject(Error('图片解码失败'));img.src=url;});
+  }catch(error){URL.revokeObjectURL(url);setStatus('参考图载入失败：'+error.message,true);return;}
+  let eyes=null, detectorError='';
+  try{
+    const response=await fetch('/api/reference',{method:'POST',headers:{'Content-Type':file.type||'application/octet-stream'},body:file});
+    if(!response.ok)throw Error((await response.text()).slice(0,160));
+    eyes=await response.json();
+  }catch(error){detectorError=error.message;}
+  const imgW=eyes?eyes.image_width:image.naturalWidth;
+  const imgH=eyes?eyes.image_height:image.naturalHeight;
+  const pxPerM=eyes&&eyes.pixels_per_meter>1?eyes.pixels_per_meter:1000;
+  const mpp=1/pxPerM;
+  disposeReference();
+  referenceURL=url;
+  const texture=new THREE.Texture(image);
+  texture.colorSpace=THREE.SRGBColorSpace;
+  texture.anisotropy=renderer.capabilities.getMaxAnisotropy();
+  texture.needsUpdate=true;
+  const material=new THREE.MeshBasicMaterial({map:texture,side:THREE.DoubleSide,depthWrite:false,alphaTest:0.001,toneMapped:false});
+  const plane=new THREE.Mesh(new THREE.PlaneGeometry(imgW*mpp,imgH*mpp),material);
+  plane.renderOrder=-10;          // drawn first, never hides the body
+  referencePlane=plane;
+  referenceRoot=new THREE.Group();
+  referenceRoot.add(plane);
+  scene.add(referenceRoot);
+  if(eyes){
+    referenceLayout={label:name,imgW:imgW,imgH:imgH,eyePx:eyes.eye_midpoint,pxPerM:pxPerM};
+    referenceStatus='';
+    realignReference();
+    setStatus('已载入参考图并对齐双眼（joint 23/24）');
+  }else{
+    referenceLayout=null;
+    const box=new THREE.Box3().setFromObject(meshRoot||scene), centre=box.getCenter(new THREE.Vector3());
+    plane.position.set(centre.x,centre.y,centre.z);
+    refreshReferenceInfo();
+    setStatus('未检测到双眼，参考图按 1 px = 1 mm 放在模型中心：'+detectorError,true);
+  }
+  updateReferenceButtons();
+}
 function segmentEditor(){
   const host=document.querySelector('#segment-editor');
-  if(selectedSegment===null||!skeletonData){host.className='segment-empty';host.textContent='点击一条黄色骨骼连线以编辑该骨段。';return;}
+  if(selectedSegment===null||!skeletonData){host.className='segment-empty';host.textContent='点击一条黄色骨骼连线以编辑该骨段。';updateSelectionVisuals();return;}
   const child=selectedSegment,parent=skeletonData.parents[child];
   const cfg=skeletonData.segments[String(child)]||{length:1,radii:[1,1,1]};
   const names=skeletonData.names;
@@ -99,15 +231,253 @@ function segmentEditor(){
       setStatus('已重置当前骨段');
     }catch(error){setStatus('骨段重置失败：'+error.message,true);}
   };
+  updateSelectionVisuals();
 }
 async function applySegment(child,length,radii){setStatus('正在更新骨段 Mesh...');try{const r=await fetch('/api/segment',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,child,length,radii})});if(!r.ok)throw Error(await r.text());await load(selected,true,true);selectedSegment=child;segmentEditor()}catch(e){setStatus('骨段更新失败：'+e.message,true)}}
-function addSkeleton(data,groundOffset){if(skeletonRoot)scene.remove(skeletonRoot);skeletonData=data;skeletonRoot=new THREE.Group();skeletonRoot.position.y=groundOffset;jointPickers=[];const joints=data.joints.map(p=>new THREE.Vector3(...p));const points=[],children=[];for(let i=0;i<data.parents.length;i++){const parent=data.parents[i];if(parent>=0&&parent<joints.length){points.push(joints[parent],joints[i]);children.push(i)}}const lineGeometry=new THREE.BufferGeometry().setFromPoints(points);segmentLines=new THREE.LineSegments(lineGeometry,new THREE.LineBasicMaterial({color:0xffc64d,depthTest:false,depthWrite:false,transparent:true,opacity:1}));segmentLines.userData.children=children;segmentLines.renderOrder=2;skeletonRoot.add(segmentLines);const jointMat=new THREE.MeshBasicMaterial({color:0xfff0a6,depthTest:false,depthWrite:false});for(let i=0;i<joints.length;i++){const dot=new THREE.Mesh(new THREE.SphereGeometry(.006,6,4),jointMat);dot.position.copy(joints[i]);dot.renderOrder=3;dot.userData.joint=i;skeletonRoot.add(dot);if(i>0&&i<=21)jointPickers.push(dot);}scene.add(skeletonRoot);segmentEditor();}
-async function load(gender,edited=false,force=false){if(selected===gender&&!force)return;const shouldFrame=selected!==gender||!meshRoot;selected=gender;choices.value=gender;setStatus('正在加载 '+gender+' 模型...');try{const suffix='?revision='+(++revision);const [obj,skeleton]=await Promise.all([new OBJLoader().loadAsync('/api/model/'+gender+suffix),fetch('/api/skeleton/'+gender+suffix,{cache:'no-store'}).then(r=>{if(!r.ok)throw Error('骨架数据读取失败');return r.json()})]);if(meshRoot)scene.remove(meshRoot);meshRoot=obj;obj.traverse(x=>{if(x.isMesh){x.geometry.computeVertexNormals();x.material=new THREE.MeshStandardMaterial({color:0x9ab7df,roughness:.72,metalness:.03,transparent:true,opacity:.42,depthWrite:false,side:THREE.DoubleSide});}});const groundOffset=.02-new THREE.Box3().setFromObject(obj).min.y;obj.position.y=groundOffset;scene.add(obj);addSkeleton(skeleton,groundOffset);if(shouldFrame)frame(obj);document.querySelector('#reset').disabled=false;setStatus('已加载 '+gender+'，可拖动黄色身体关节');}catch(e){setStatus('加载失败：'+e.message,true)}}
+// ---------------------------- bone selection highlight ---------------------
+// Selecting a bone thickens it, tints its own skinned vertices and marks the
+// interior division points of the current cross-section profile.
+const MESH_BASE_COLOUR=new THREE.Color(0x9ab7df);
+const MESH_SELECT_COLOUR=new THREE.Color(0xffff00);
+const SELECTED_BONE_COLOUR=0xff6a3d;
+const DIVIDER_COLOUR=0x5ce1ff;
+let segmentOwners=null, segmentOwnersGender=null, selectionGroup=null;
+
+function paintMesh(){
+  if(!meshRoot)return;
+  meshRoot.traverse((object)=>{
+    if(!object.isMesh)return;
+    const geometry=object.geometry, count=geometry.attributes.position.count;
+    const colours=new Float32Array(count*3);
+    const selected=(selectedSegment!==null&&segmentOwners&&segmentOwners.length===count)?selectedSegment:-1;
+    for(let i=0;i<count;i++){
+      const colour=(segmentOwners&&segmentOwners[i]===selected)?MESH_SELECT_COLOUR:MESH_BASE_COLOUR;
+      colours[i*3]=colour.r;colours[i*3+1]=colour.g;colours[i*3+2]=colour.b;
+    }
+    geometry.setAttribute('color',new THREE.BufferAttribute(colours,3));
+    object.material.vertexColors=true;
+    object.material.color.set(0xffffff);
+    object.material.needsUpdate=true;
+  });
+}
+async function ensureOwners(gender){
+  if(segmentOwners&&segmentOwnersGender===gender)return;
+  segmentOwners=null;segmentOwnersGender=null;
+  try{
+    const response=await fetch('/api/weights/'+gender+'?revision='+(++revision),{cache:'no-store'});
+    if(!response.ok)throw Error(await response.text());
+    const owners=new Uint8Array(await response.arrayBuffer());
+    if(!meshRoot)return;
+    segmentOwners=owners;
+    segmentOwnersGender=gender;
+    paintMesh();
+    updateSelectionVisuals();
+  }catch(error){segmentOwners=null;}
+}
+function updateSelectionVisuals(){
+  if(selectionGroup&&skeletonRoot)skeletonRoot.remove(selectionGroup);
+  selectionGroup=null;
+  paintMesh();
+  if(selectedSegment===null||!skeletonData||!skeletonRoot)return;
+  const child=selectedSegment, parent=skeletonData.parents[child];
+  if(parent===undefined||parent<0)return;
+  const a=new THREE.Vector3(...skeletonData.joints[parent]);
+  const b=new THREE.Vector3(...skeletonData.joints[child]);
+  const direction=new THREE.Vector3().subVectors(b,a);
+  const length=direction.length();
+  if(length<1e-6)return;
+  const group=new THREE.Group();
+  const bone=new THREE.Mesh(
+    new THREE.CylinderGeometry(.005,.005,length,10,1,true),
+    new THREE.MeshBasicMaterial({color:SELECTED_BONE_COLOUR,transparent:true,opacity:.95,depthTest:false,depthWrite:false,side:THREE.DoubleSide})
+  );
+  bone.position.copy(a).add(b).multiplyScalar(.5);
+  bone.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),direction.clone().normalize());
+  bone.renderOrder=4;
+  group.add(bone);
+  const config=skeletonData.segments[String(child)];
+  const divisions=Math.max(2,(config&&Array.isArray(config.radii))?config.radii.length:3);
+  // transparent:true keeps the markers in the same (transparent) queue as the
+  // highlighted bone, so renderOrder decides and they are drawn on top of it.
+  const markerMaterial=new THREE.MeshBasicMaterial({color:DIVIDER_COLOUR,transparent:true,opacity:1,depthTest:false,depthWrite:false});
+  for(let index=1;index<divisions-1;index+=1){
+    const t=index/(divisions-1);
+    const marker=new THREE.Mesh(new THREE.SphereGeometry(.004,12,8),markerMaterial);
+    marker.position.lerpVectors(a,b,t);
+    marker.renderOrder=5;
+    group.add(marker);
+  }
+  selectionGroup=group;
+  skeletonRoot.add(group);
+}
+function clearSegmentSelection(){
+  if(selectedSegment===null)return;
+  selectedSegment=null;
+  segmentEditor();
+  setStatus('已取消骨段选择');
+}
+
+function addSkeleton(data,groundOffsetY){
+  if(skeletonRoot)scene.remove(skeletonRoot);
+  skeletonData=data;
+  skeletonRoot=new THREE.Group();
+  skeletonRoot.position.y=groundOffsetY;
+  jointPickers=[];
+  const joints=data.joints.map((p)=>new THREE.Vector3(...p));
+  const points=[],children=[];
+  for(let i=0;i<data.parents.length;i++){const parent=data.parents[i];if(parent>=0&&parent<joints.length){points.push(joints[parent],joints[i]);children.push(i);}}
+  const lineGeometry=new THREE.BufferGeometry().setFromPoints(points);
+  segmentLines=new THREE.LineSegments(lineGeometry,new THREE.LineBasicMaterial({color:0xffc64d,depthTest:false,depthWrite:false,transparent:true,opacity:1}));
+  segmentLines.userData.children=children;
+  segmentLines.renderOrder=2;
+  skeletonRoot.add(segmentLines);
+  const jointMat=new THREE.MeshBasicMaterial({color:0xfff0a6,depthTest:false,depthWrite:false});
+  for(let i=0;i<joints.length;i++){
+    const dot=new THREE.Mesh(new THREE.SphereGeometry(.006,6,4),jointMat);
+    dot.position.copy(joints[i]);
+    dot.renderOrder=3;
+    dot.userData.joint=i;
+    skeletonRoot.add(dot);
+    if(i>0&&i<=21)jointPickers.push(dot);
+  }
+  scene.add(skeletonRoot);
+  segmentEditor();
+  realignReference();
+}
+// OBJLoader expands a mesh into one vertex per triangle corner (3 x 20908 =
+// 62724 vertices), which breaks the 1:1 mapping onto the 10475 SMPL-X skinning
+// weights.  Parse the OBJ ourselves and keep it indexed so vertex index ==
+// model vertex index -- that is what makes per-vertex skin tinting possible.
+function parseObjGeometry(text){
+  const positions=[], indices=[];
+  const lines=text.split('\n');
+  for(let i=0;i<lines.length;i+=1){
+    const line=lines[i];
+    if(line.charCodeAt(0)===118&&line.charCodeAt(1)===32){            // 'v x y z'
+      const p=line.split(/\s+/);
+      positions.push(+p[1],+p[2],+p[3]);
+    }else if(line.charCodeAt(0)===102&&line.charCodeAt(1)===32){      // 'f a b c'
+      const p=line.split(/\s+/);
+      for(let k=1;k<p.length;k+=1){
+        const slash=p[k].indexOf('/');
+        indices.push(parseInt(slash<0?p[k]:p[k].slice(0,slash),10)-1);
+      }
+    }
+  }
+  const geometry=new THREE.BufferGeometry();
+  geometry.setAttribute('position',new THREE.Float32BufferAttribute(positions,3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
+async function load(gender,edited=false,force=false){
+  if(selected===gender&&!force)return;
+  const shouldFrame=selected!==gender||!meshRoot;
+  selected=gender;choices.value=gender;
+  setStatus('正在加载 '+gender+' 模型...');
+  try{
+    const suffix='?revision='+(++revision);
+    const [meshText,skeleton]=await Promise.all([
+      fetch('/api/model/'+gender+suffix,{cache:'no-store'}).then((r)=>{if(!r.ok)throw Error('网格读取失败');return r.text();}),
+      fetch('/api/skeleton/'+gender+suffix,{cache:'no-store'}).then((r)=>{if(!r.ok)throw Error('骨架数据读取失败');return r.json();})
+    ]);
+    if(meshRoot)scene.remove(meshRoot);
+    const material=new THREE.MeshStandardMaterial({color:0xffffff,vertexColors:true,roughness:.72,metalness:.03,transparent:true,opacity:.42,depthWrite:false,side:THREE.DoubleSide});
+    const obj=new THREE.Mesh(parseObjGeometry(meshText),material);
+    meshRoot=obj;
+    groundOffset=.02-new THREE.Box3().setFromObject(obj).min.y;
+    obj.position.y=groundOffset;
+    scene.add(obj);
+    paintMesh();
+    addSkeleton(skeleton,groundOffset);
+    ensureOwners(gender);
+    if(shouldFrame)frame(obj);
+    document.querySelector('#reset').disabled=false;
+    setStatus('已加载 '+gender+'，可拖动黄色身体关节');
+  }catch(e){setStatus('加载失败：'+e.message,true);}
+}
 function updatePointer(event){const r=canvas.getBoundingClientRect();pointer.set((event.clientX-r.left)/r.width*2-1,-((event.clientY-r.top)/r.height)*2+1);raycaster.setFromCamera(pointer,camera)}
-canvas.addEventListener('pointerdown',event=>{if(!selected)return;updatePointer(event);const hit=raycaster.intersectObjects(jointPickers,false)[0];if(hit){const joint=hit.object;drag={joint:joint.userData.joint,dot:joint};const worldPosition=joint.getWorldPosition(new THREE.Vector3());dragPlane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(new THREE.Vector3()),worldPosition);controls.enabled=false;canvas.setPointerCapture(event.pointerId);setStatus('拖动关节 '+drag.joint+'，松开后应用 '+(document.querySelector('#full-body-ik').checked?'全身 IK':'局部旋转'));event.preventDefault();return}if(segmentLines){raycaster.params.Line.threshold=.035;const lineHit=raycaster.intersectObject(segmentLines,false)[0];if(lineHit){const child=segmentLines.userData.children[Math.floor(lineHit.index/2)];if(child<=21){selectedSegment=child;segmentEditor();setStatus('已选择骨段 '+skeletonData.names[skeletonData.parents[child]]+' → '+skeletonData.names[child]);event.preventDefault()}}}});
-canvas.addEventListener('pointermove',event=>{if(!drag)return;updatePointer(event);const p=new THREE.Vector3();if(raycaster.ray.intersectPlane(dragPlane,p))drag.dot.position.copy(skeletonRoot.worldToLocal(p.clone()))});
-canvas.addEventListener('pointerup',async event=>{if(!drag)return;const moved=drag;drag=null;controls.enabled=true;canvas.releasePointerCapture(event.pointerId);const fullBody=document.querySelector('#full-body-ik').checked;setStatus('正在求解 '+(fullBody?'全身 IK...':'局部旋转...'));try{const r=await fetch('/api/pose',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,joint:moved.joint,target:moved.dot.position.toArray(),full_body:fullBody})});if(!r.ok)throw Error(await r.text());await r.json();await load(selected,true,true)}catch(e){setStatus('IK 求解失败：'+e.message,true);await load(selected,true,true)}});
+let gesture=null;
+canvas.addEventListener('pointerdown',(event)=>{
+  gesture={x:event.clientX,y:event.clientY,moved:false,boneHit:false,joint:false};
+  if(!selected)return;
+  updatePointer(event);
+  const hit=raycaster.intersectObjects(jointPickers,false)[0];
+  if(hit){
+    const joint=hit.object;
+    drag={joint:joint.userData.joint,dot:joint};
+    gesture.joint=true;
+    const worldPosition=joint.getWorldPosition(new THREE.Vector3());
+    dragPlane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(new THREE.Vector3()),worldPosition);
+    controls.enabled=false;
+    canvas.setPointerCapture(event.pointerId);
+    setStatus('拖动关节 '+drag.joint+'，松开后应用 '+(document.querySelector('#full-body-ik').checked?'全身 IK':'局部旋转'));
+    event.preventDefault();
+    return;
+  }
+  if(segmentLines){
+    raycaster.params.Line.threshold=.035;
+    const lineHit=raycaster.intersectObject(segmentLines,false)[0];
+    if(lineHit){
+      const child=segmentLines.userData.children[Math.floor(lineHit.index/2)];
+      if(child<=21){
+        selectedSegment=child;
+        gesture.boneHit=true;
+        segmentEditor();
+        setStatus('已选择骨段 '+skeletonData.names[skeletonData.parents[child]]+' → '+skeletonData.names[child]);
+        event.preventDefault();
+      }
+    }
+  }
+});
+canvas.addEventListener('pointermove',(event)=>{
+  if(gesture&&!gesture.moved&&(Math.abs(event.clientX-gesture.x)>4||Math.abs(event.clientY-gesture.y)>4))gesture.moved=true;
+  if(!drag)return;
+  updatePointer(event);
+  const p=new THREE.Vector3();
+  if(raycaster.ray.intersectPlane(dragPlane,p))drag.dot.position.copy(skeletonRoot.worldToLocal(p.clone()));
+});
+canvas.addEventListener('pointerup',async (event)=>{
+  const finished=gesture;
+  gesture=null;
+  if(drag){
+    const moved=drag;
+    drag=null;
+    controls.enabled=true;
+    canvas.releasePointerCapture(event.pointerId);
+    const fullBody=document.querySelector('#full-body-ik').checked;
+    setStatus('正在求解 '+(fullBody?'全身 IK...':'局部旋转...'));
+    try{
+      const r=await fetch('/api/pose',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,joint:moved.joint,target:moved.dot.position.toArray(),full_body:fullBody})});
+      if(!r.ok)throw Error(await r.text());
+      await r.json();
+      clearSegmentSelection();
+      await load(selected,true,true);
+    }catch(e){
+      setStatus('IK 求解失败：'+e.message,true);
+      clearSegmentSelection();
+      await load(selected,true,true);
+    }
+    return;
+  }
+  // A plain click that changed nothing deselects; an orbit / pan drag counts as
+  // a modification and leaves the selection alone.
+  if(finished&&!finished.moved&&!finished.boneHit&&!finished.joint)clearSegmentSelection();
+});
 document.querySelector('#reset').onclick=async()=>{if(!selected)return;const button=document.querySelector('#reset');button.disabled=true;setStatus('正在重置当前姿态...');try{const response=await fetch('/api/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected})});if(!response.ok)throw Error(await response.text());const result=await response.json();if(!result.ok)throw Error('重置未完成');selectedSegment=null;await load(selected,true,true);setStatus('已重置为默认 SMPL-X 姿态');}catch(error){setStatus('重置失败：'+error.message,true);button.disabled=false;}};
+const refInput=document.querySelector('#ref-file'), refPick=document.querySelector('#ref-pick'), refClear=document.querySelector('#ref-clear'), refHide=document.querySelector('#ref-hide');
+refPick.onclick=()=>refInput.click();
+refInput.onchange=()=>{const file=refInput.files&&refInput.files[0];refInput.value='';if(file)showReferenceFile(file);};
+refHide.onclick=()=>{
+  if(!referenceRoot)return;
+  referenceHidden=!referenceHidden;
+  referenceRoot.visible=!referenceHidden;
+  updateReferenceButtons();
+  refreshReferenceInfo();
+  setStatus(referenceHidden?'参考图已隐藏':'参考图已显示');
+};
+refClear.onclick=()=>{clearReference();setStatus('已移除参考图');};
 async function init(){const r=await fetch('/api/models');if(!r.ok)throw Error('无法读取模型信息');const data=await r.json();for(const item of data.models){const option=document.createElement('option');option.value=item.gender;option.textContent=item.label+(item.available?'':'（未安装）');option.disabled=!item.available;choices.append(option)}choices.onchange=()=>load(choices.value,true);const first=data.models.find(x=>x.available);if(first)load(first.gender,true);else setStatus('未找到可用 SMPL-X 模型文件',true)}
 init().catch(e=>setStatus(e.message,true));
 </script></body></html>"""
@@ -124,10 +494,58 @@ JOINT_NAMES = [
 ]
 
 
+DEVICE_CHOICES = ("auto", "cpu", "cuda")
+
+
+def resolve_device(requested: str = "auto") -> tuple[str, str]:
+    """Decide where SMPL-X inference runs, before any weights are loaded.
+
+    ``auto`` keeps CUDA only when the driver, the CUDA-enabled PyTorch build and
+    a real tensor operation all succeed; anything else falls back to the CPU,
+    which is the behaviour of the original code.  The probe is one tiny
+    allocation plus one elementwise op, so a broken driver surfaces here at
+    startup instead of inside the first request.
+
+    Returns ``(device, reason)``; ``reason`` is meant for the startup log.
+    """
+    requested = (requested or "auto").lower()
+    if requested not in DEVICE_CHOICES:
+        raise ValueError(f"unknown device {requested!r}; expected one of {DEVICE_CHOICES}")
+    if requested == "cpu":
+        return "cpu", "requested on the command line"
+
+    import torch
+
+    if not torch.cuda.is_available():
+        return "cpu", (
+            f"torch.cuda.is_available() is False "
+            f"(torch {torch.__version__}, CUDA build {torch.version.cuda})"
+        )
+
+    try:
+        probe = torch.zeros(8, dtype=torch.float32, device="cuda") + 1.0
+        torch.cuda.synchronize()
+        if not bool(torch.isfinite(probe).all()):
+            raise RuntimeError("probe produced non-finite values")
+    except Exception as exc:
+        return "cpu", f"CUDA probe failed: {type(exc).__name__}: {exc}"
+
+    try:
+        name = torch.cuda.get_device_name(0)
+        major, minor = torch.cuda.get_device_capability(0)
+        return "cuda", f"{name} (sm_{major}{minor}, CUDA {torch.version.cuda})"
+    except Exception:
+        return "cuda", f"CUDA device (CUDA {torch.version.cuda})"
+
+
 class ModelCache:
-    def __init__(self, model_dir: Path, cache_dir: Path):
+    def __init__(self, model_dir: Path, cache_dir: Path, device: str = "cpu",
+                 detector_dir: str = ""):
         self.model_dir = model_dir
         self.cache_dir = cache_dir
+        self.detector_dir = detector_dir
+        self._detector = None
+        self.device = device if device in ("cpu", "cuda") else "cpu"
         self.lock = threading.Lock()
         self.poses = {}
         self.models = {}
@@ -144,16 +562,54 @@ class ModelCache:
     def _model(self, gender: str):
         if gender not in self.models:
             import smplx
-            self.models[gender] = smplx.create(
+            model = smplx.create(
                 str(self.source(gender)), model_type="smplx", gender=gender,
                 use_pca=False, flat_hand_mean=True, batch_size=1,
             )
+            self.models[gender] = self._place_model(model)
         return self.models[gender]
+
+    def _place_model(self, model):
+        """Move a newly created model onto the selected device.
+
+        A failed transfer (driver/architecture mismatch, out of memory) must not
+        take the viewer down, so the session retreats to the CPU -- the original
+        behaviour -- and reports why.
+        """
+        if self.device == "cpu":
+            return model
+        try:
+            return model.to(self.device)
+        except Exception as exc:
+            print(
+                f"[device] could not move SMPL-X to {self.device}: "
+                f"{type(exc).__name__}: {exc} -> falling back to cpu",
+                flush=True,
+            )
+            # Anything already cached has to come back with us, otherwise a CUDA
+            # pose tensor would meet a CPU model on the next request.
+            for cached in self.models.values():
+                try:
+                    cached.to("cpu")
+                except Exception:
+                    pass
+            self.poses.clear()
+            self.outputs.clear()
+            self.geometry_cache.clear()
+            self.device = "cpu"
+            try:
+                return model.to("cpu")
+            except Exception:
+                return model
 
     def _pose(self, gender: str, model):
         import torch
         if gender not in self.poses:
-            self.poses[gender] = torch.zeros((1, model.NUM_BODY_JOINTS * 3), dtype=torch.float32)
+            self.poses[gender] = torch.zeros(
+                (1, model.NUM_BODY_JOINTS * 3),
+                dtype=torch.float32,
+                device=self.device,
+            )
         return self.poses[gender]
 
     def _output(self, gender: str):
@@ -387,7 +843,9 @@ class ModelCache:
         with self.lock:
             model = self._model(gender)
             import torch
-            self.poses[gender] = torch.zeros((1, model.NUM_BODY_JOINTS * 3), dtype=torch.float32)
+            self.poses[gender] = torch.zeros(
+                (1, model.NUM_BODY_JOINTS * 3), dtype=torch.float32, device=self.device
+            )
             self.segment_configs.pop(gender, None)
             self.outputs.pop(gender, None)
             self._invalidate_geometry(gender)
@@ -418,7 +876,9 @@ class ModelCache:
                     raise ValueError("This root-adjacent joint requires full-body IK")
                 chain = [parent]
             variables = torch.nn.Parameter(base.clone())
-            target_tensor = torch.tensor(target, dtype=torch.float32).view(1, 3)
+            target_tensor = torch.tensor(
+                target, dtype=torch.float32, device=self.device
+            ).view(1, 3)
             with torch.no_grad():
                 initial = model(body_pose=base).joints[:, :len(parents)]
             optimizer = torch.optim.Adam([variables], lr=0.035)
@@ -440,6 +900,95 @@ class ModelCache:
             with torch.no_grad():
                 self.outputs[gender] = model(body_pose=self.poses[gender])
             self._invalidate_geometry(gender)
+
+
+    # ------------------------------------------------------------------
+    # Reference picture: 2D pose estimation (AnimePoseDetector)
+    # ------------------------------------------------------------------
+
+    def _detector_module(self):
+        """Import AnimePoseDetector lazily (it needs OpenCV, never torch)."""
+        if self._detector is None:
+            if not self.detector_dir or not Path(self.detector_dir).is_dir():
+                raise RuntimeError(f"AnimePoseDetector 目录不可用: {self.detector_dir!r}")
+            if self.detector_dir not in sys.path:
+                sys.path.insert(0, self.detector_dir)
+            import anime_pose_detector as apd
+            self._detector = apd
+        return self._detector
+
+    def reference_eyes(self, image_bytes: bytes) -> dict:
+        """Run AnimePoseDetector on an upload and return the eye anchor.
+
+        The detector always writes ``<stem>_result.json`` beside its input, so
+        the upload is decoded inside a throw-away directory that is removed on
+        the way out: the user's picture never reaches the filesystem.
+        """
+        apd = self._detector_module()
+        with tempfile.TemporaryDirectory(prefix="smplx_ref_") as tmp:
+            source = Path(tmp) / "upload.png"
+            source.write_bytes(image_bytes)
+            result = apd.estimate(
+                str(source),
+                smplx_dir=str(self.model_dir),
+                output_dir=tmp,
+                write_vis=False,
+            )
+        eyes = result.get("eyes") or {}
+        midpoint = result.get("eye_midpoint")
+        left = (eyes.get("left") or {}).get("center")
+        right = (eyes.get("right") or {}).get("center")
+        if not midpoint or not left or not right:
+            raise ValueError("未检测到双眼")
+        smplx_block = result.get("smplx") or {}
+        fit = smplx_block.get("fit_core_torso") or smplx_block.get("image_to_model_2d") or {}
+        scale = float(fit.get("scale") or 0.0)
+        if not np.isfinite(scale) or scale <= 1e-6:
+            raise ValueError("检测到的像素/米比例无效")
+        return {
+            "ok": True,
+            "eye_midpoint": [float(midpoint[0]), float(midpoint[1])],
+            "eye_left": [float(left[0]), float(left[1])],
+            "eye_right": [float(right[0]), float(right[1])],
+            "pixels_per_meter": scale,
+            "image_width": int(result["image_width"]),
+            "image_height": int(result["image_height"]),
+            "elapsed_ms": result.get("elapsed_ms"),
+        }
+
+    def owners(self, gender: str) -> bytes:
+        """One byte per vertex: the body segment (1..21) that owns it.
+
+        This is the *same* geometric partition the segment editor deforms with
+        (nearest bone segment in the rest pose), so the highlighted skin is
+        exactly the surface a segment edit moves.  ``argmax(lbs_weights)`` would
+        be wrong here: SMPL-X binds a bone's surface to its *proximal* joint, so
+        a forearm segment would only light up ~200 hand vertices.
+        """
+        if gender not in GENDERS or not self.available(gender):
+            raise FileNotFoundError(gender)
+        model = self._model(gender)
+        vertices = model.v_template.detach().cpu().numpy().astype(np.float32)
+        joints = (model.J_regressor @ model.v_template).detach().cpu().numpy()[:len(model.parents)]
+        parents = model.parents.cpu().numpy().astype(np.int32)
+        nearest_distance = np.full(len(vertices), np.inf, dtype=np.float32)
+        nearest_segment = np.zeros(len(vertices), dtype=np.uint8)
+        for candidate in range(1, 22):
+            parent = int(parents[candidate])
+            if parent < 0:
+                continue
+            start, end = joints[parent], joints[candidate]
+            vector = end - start
+            length_sq = float(vector @ vector)
+            if length_sq < 1e-10:
+                continue
+            relative = vertices - start
+            t = np.clip((relative @ vector) / length_sq, 0.0, 1.0)
+            distance_sq = ((vertices - (start + t[:, None] * vector)) ** 2).sum(axis=1)
+            replace = distance_sq < nearest_distance
+            nearest_distance[replace] = distance_sq[replace]
+            nearest_segment[replace] = candidate
+        return nearest_segment.tobytes()
 
 
 def handler_factory(cache: ModelCache):
@@ -497,10 +1046,50 @@ def handler_factory(cache: ModelCache):
                 except Exception as exc:
                     self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
                 return
+            if path.startswith("/api/weights/"):
+                gender = path.rsplit("/", 1)[-1]
+                try:
+                    data = cache.owners(gender)
+                except FileNotFoundError:
+                    self.send_error(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
+                    return
+                except Exception as exc:
+                    self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                    return
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Cache-Control", "no-store, max-age=0")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             self.send_error(HTTPStatus.NOT_FOUND)
+
+        def _handle_reference(self):
+            """Decode an uploaded picture with AnimePoseDetector, return its eyes."""
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                size = 0
+            if size <= 0:
+                self.send_error(HTTPStatus.BAD_REQUEST, "empty upload")
+                return
+            if size > 32 * 1024 * 1024:
+                self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "picture larger than 32 MiB")
+                return
+            payload = self.rfile.read(size)
+            try:
+                result = cache.reference_eyes(payload)
+            except Exception as exc:
+                self.send_error(HTTPStatus.UNPROCESSABLE_ENTITY, f"{type(exc).__name__}: {exc}")
+                return
+            self.send_json(result)
 
         def do_POST(self):
             path = urlparse(self.path).path
+            if path == "/api/reference":
+                self._handle_reference()
+                return
             try:
                 size = int(self.headers.get("Content-Length", "0"))
                 data = json.loads(self.rfile.read(size).decode("utf-8"))
@@ -553,8 +1142,32 @@ def main():
     parser.add_argument("--cache-dir", type=Path, default=Path("/home/hgc/project/AnimeAvatarGen/outputs/smplx_tpose_viewer"))
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8766)
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        choices=DEVICE_CHOICES,
+        help="auto (CUDA when a working GPU is detected) | cuda | cpu",
+    )
+    parser.add_argument(
+        "--detector-dir",
+        default=os.environ.get("ANIME_POSE_DETECTOR_DIR", "/home/lomerson/MyProjects/AnimePoseDetector"),
+        help="directory holding anime_pose_detector.py (reference-picture eye detection)",
+    )
     args = parser.parse_args()
-    server = ThreadingHTTPServer((args.host, args.port), handler_factory(ModelCache(args.model_dir, args.cache_dir)))
+    device, reason = resolve_device(args.device)
+    if args.device != "auto" and args.device != device:
+        print(f"[device] {args.device} requested but unusable -> cpu", flush=True)
+    print(f"device: {device} — {reason}", flush=True)
+    print(f"detector: {args.detector_dir}", flush=True)
+    server = ThreadingHTTPServer(
+        (args.host, args.port),
+        handler_factory(
+            ModelCache(
+                args.model_dir, args.cache_dir, device=device,
+                detector_dir=args.detector_dir,
+            )
+        ),
+    )
     print(f"SMPL-X viewer: http://{args.host}:{args.port}", flush=True)
     server.serve_forever()
 
