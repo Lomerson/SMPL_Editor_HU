@@ -49,7 +49,13 @@ HTML = r"""<!doctype html>
   .hud { position:absolute; top:18px; right:18px; background:#1a1e25e8; border:1px solid #343b47; border-radius:6px; padding:11px 13px; color:#b9c2d0; font-size:12px; line-height:1.55; }
   .pose-controls { display:flex; gap:8px; align-items:stretch; } .toggle { display:flex; align-items:center; gap:7px; min-height:38px; flex:1; padding:0 10px; border:1px solid #414957; border-radius:6px; background:#252b35; font-size:14px; cursor:pointer; white-space:nowrap; } .toggle input { width:16px; height:16px; accent-color:#70a5f3; } #reset { min-height:38px; padding:0 10px; font-size:13px; white-space:nowrap; }
   .segment-empty { color:#8f99a9; font-size:13px; } .segment-name { color:#d9e5f8; font-size:13px; margin:0 0 10px; } .field { display:grid; grid-template-columns:62px minmax(0,1fr) 48px; gap:7px; align-items:center; margin:8px 0; font-size:12px; color:#b9c3d0; } input[type=range] { width:100%; accent-color:#70a5f3; } .value { color:#f1f4f8; text-align:right; font-variant-numeric:tabular-nums; } .segment-tools { display:flex; gap:8px; align-items:center; margin:10px 0 4px; } .segment-tools select { flex:1; min-height:34px; font-size:13px; } .small { min-height:34px; padding:0 10px; font-size:12px; } .selected-bone { color:#fff1b3; }
-  .error { color:#ffabb8 !important; } .ref-row { display:flex; gap:8px; align-items:stretch; } #ref-pick { flex:1 1 auto; min-width:0; text-align:center; } #ref-hide, #ref-clear { flex:0 0 62px; min-width:62px; text-align:center; } #ref-file { display:none; } .ref-info { margin:8px 0 0; } @media(max-width:700px) { #app{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)} aside{padding:14px; border-right:0; border-bottom:1px solid #303642; gap:12px}.gender{grid-template-columns:repeat(3,1fr)} button{font-size:12px;text-align:center} #status{margin-top:0} }
+  .error { color:#ffabb8 !important; }
+  #toasts { position:fixed; right:18px; bottom:18px; display:flex; flex-direction:column; gap:8px; z-index:60; pointer-events:none; align-items:flex-end; }
+  .toast { background:#f2c94c; color:#241c00; font-size:13px; line-height:1.45; padding:10px 14px; border-radius:6px; box-shadow:0 6px 18px rgba(0,0,0,.35); max-width:320px; transition:opacity .25s ease, transform .25s ease; }
+  .toast.out { opacity:0; transform:translateY(6px); }
+  button.locked { opacity:.45; cursor:not-allowed; }
+  .skeleton-locked #seg-length { opacity:.5; }
+  .skeleton-locked #seg-length-row { cursor:not-allowed; } .ref-row { display:flex; gap:8px; align-items:stretch; } #ref-pick { flex:1 1 auto; min-width:0; text-align:center; } #ref-hide, #ref-clear { flex:0 0 62px; min-width:62px; text-align:center; } #ref-file { display:none; } .ref-info { margin:8px 0 0; } @media(max-width:700px) { #app{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)} aside{padding:14px; border-right:0; border-bottom:1px solid #303642; gap:12px}.gender{grid-template-columns:repeat(3,1fr)} button{font-size:12px;text-align:center} #status{margin-top:0} }
 </style>
 </head>
 <body><div id="app"><aside>
@@ -59,7 +65,7 @@ HTML = r"""<!doctype html>
   <details class="panel" open><summary class="section-title">骨段编辑</summary><div id="segment-editor" class="segment-empty">点击一条黄色骨骼连线以编辑该骨段。</div></details>
   <details class="panel" open><summary class="section-title">参考图</summary><div class="ref-row"><button id="ref-pick">选择图片</button><button id="ref-hide" class="small" disabled>隐藏</button><button id="ref-clear" class="small" disabled>移除</button></div><input id="ref-file" type="file" accept="image/png,image/jpeg,image/jpg,image/webp,image/bmp,image/gif,image/tiff,image/*"><p class="sub ref-info" id="ref-info">未选择图片。上传后自动用 AnimePoseDetector 对齐双眼。</p></details>
   <div id="status">正在读取模型信息...</div>
-</aside><main><canvas id="viewer"></canvas><div class="hud">点击黄色身体关节后拖动<br>空白处拖动旋转 · 滚轮缩放</div></main></div>
+</aside><main><canvas id="viewer"></canvas><div class="hud">点击黄色身体关节后拖动<br>空白处拖动旋转 · 滚轮缩放</div><div id="toasts"></div></main></div>
 <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"}}</script>
 <script type="module">
 import * as THREE from 'three';
@@ -83,6 +89,8 @@ function frame(root){const box=new THREE.Box3().setFromObject(root), c=box.getCe
 // the model's eye midpoint (SMPL-X joints 23/24).  The model is never edited.
 let referenceRoot=null, referencePlane=null, referenceLayout=null, referenceURL=null;
 let referenceHidden=false, referenceStatus='', groundOffset=0;
+let referenceTargets=null, referenceToken=0, referenceEpoch=0;
+let referenceSolvedKey=null, referenceSolveInfo=null, referenceLocked=false;
 const EYE_LEFT_JOINT=23, EYE_RIGHT_JOINT=24;
 function refreshReferenceInfo(){
   const info=document.querySelector('#ref-info');
@@ -93,6 +101,7 @@ function refreshReferenceInfo(){
     const L=referenceLayout;
     bits.push(`${L.label} · ${L.imgW}×${L.imgH} px · ${L.pxPerM.toFixed(1)} px/m`);
     if(referenceStatus)bits.push(referenceStatus);
+    if(referenceSolveInfo)bits.push(`骨骼残差 ${referenceSolveInfo.rms.toFixed(1)} px`);
   }else{
     bits.push('未检测到双眼，按 1 px = 1 mm 放在模型中心');
   }
@@ -141,11 +150,69 @@ function disposeReference(){
   if(referenceURL){URL.revokeObjectURL(referenceURL);referenceURL=null;}
   referenceRoot=null;referencePlane=null;referenceLayout=null;
   referenceHidden=false;referenceStatus='';
+  referenceTargets=null;referenceSolvedKey=null;referenceSolveInfo=null;
+  setReferenceLock(false);
 }
 function clearReference(){
   disposeReference();
   refreshReferenceInfo();
   updateReferenceButtons();
+}
+function setReferenceLock(locked){
+  if(referenceLocked===locked)return;
+  referenceLocked=locked;
+  document.body.classList.toggle('skeleton-locked',locked);
+  const reset=document.querySelector('#reset');
+  if(reset)reset.classList.toggle('locked',locked);
+  segmentEditor();
+}
+function pushToast(text){
+  const box=document.querySelector('#toasts');
+  if(!box)return;
+  const toast=document.createElement('div');
+  toast.className='toast';
+  toast.textContent=text;
+  box.appendChild(toast);
+  while(box.children.length>3)box.removeChild(box.firstChild);   // at most 3 stacked
+  setTimeout(()=>{toast.classList.add('out');setTimeout(()=>toast.remove(),260);},3000);
+}
+function warnLocked(){
+  pushToast('骨架已处于锁定状态；请移除图片以继续编辑骨架');
+}
+// Signal hook for future head / eye editors: those move the eyes, so the whole
+// bone-length fit has to be recomputed on the next load.  Call this from any
+// panel that edits the head or the eyes.
+function invalidateReferenceAlignment(){
+  if(!referenceTargets)return;
+  referenceEpoch+=1;
+  referenceSolvedKey=null;
+}
+// Public signal hook: any panel that moves the head / eyes (or otherwise changes
+// joint positions) calls this, and the next load re-fits the bone lengths.
+window.smplxInvalidateReferenceAlignment=invalidateReferenceAlignment;
+async function maybeSolveReference(){
+  if(!referenceTargets||!selected)return;
+  const key=referenceTargets.token+'|'+selected+'|'+referenceEpoch;
+  if(referenceSolvedKey===key)return;
+  referenceSolvedKey=key;
+  setStatus('正在按参考图调整骨骼长度...');
+  try{
+    const response=await fetch('/api/reference/solve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      gender:selected,
+      pixels_per_meter:referenceTargets.mpp,
+      eye_midpoint:referenceTargets.eye,
+      joints:referenceTargets.joints,
+    })});
+    if(!response.ok)throw Error((await response.text()).slice(0,160));
+    const data=await response.json();
+    referenceSolveInfo={rms:data.rms_px,max:data.max_px,count:data.num_joints};
+    await load(selected,true,true);
+    setStatus(`骨架已按参考图锁定（${data.num_joints} 个关节，残差 ${data.rms_px.toFixed(1)} px / 最大 ${data.max_px.toFixed(1)} px）`);
+  }catch(error){
+    referenceSolveInfo=null;
+    refreshReferenceInfo();
+    setStatus('参考图骨骼对齐失败：'+error.message,true);
+  }
 }
 async function showReferenceFile(file){
   const name=file.name||'image';
@@ -182,8 +249,14 @@ async function showReferenceFile(file){
   if(eyes){
     referenceLayout={label:name,imgW:imgW,imgH:imgH,eyePx:eyes.eye_midpoint,pxPerM:pxPerM};
     referenceStatus='';
+    referenceTargets={token:++referenceToken,mpp:pxPerM,eye:eyes.eye_midpoint,joints:eyes.joints||{}};
+    referenceEpoch=0;
+    referenceSolvedKey=null;      // a new picture must always be solved again
+    referenceSolveInfo=null;
     realignReference();
+    setReferenceLock(true);
     setStatus('已载入参考图并对齐双眼（joint 23/24）');
+    maybeSolveReference();          // fit the bone lengths to the picture's joints
   }else{
     referenceLayout=null;
     const box=new THREE.Box3().setFromObject(meshRoot||scene), centre=box.getCenter(new THREE.Vector3());
@@ -201,7 +274,8 @@ function segmentEditor(){
   const names=skeletonData.names;
   host.className='';
   const lengthEnabled=(child===4||child===5||child===7||child===8||child===18||child===19||child===20||child===21);
-  const lengthControl=lengthEnabled?`<div class="field"><span>长度</span><input id="seg-length" type="range" min="0.50" max="1.80" step="0.01" value="${cfg.length}"><span class="value" id="seg-length-value">${cfg.length.toFixed(2)}</span></div>`:`<p class="sub">当前骨段仅支持横截面调整。</p>`;
+  const lengthMin=Math.min(0.50,cfg.length), lengthMax=Math.max(1.80,cfg.length);
+  const lengthControl=lengthEnabled?`<div class="field" id="seg-length-row"><span>长度</span><input id="seg-length" type="range" min="${lengthMin}" max="${lengthMax}" step="0.01" value="${cfg.length}" ${referenceLocked?'disabled':''}><span class="value" id="seg-length-value">${cfg.length.toFixed(2)}</span></div>`:`<p class="sub">当前骨段仅支持横截面调整。</p>`;
   host.innerHTML=`<p class="segment-name"><span class="selected-bone">${names[parent]} → ${names[child]}</span></p>${lengthControl}<div class="segment-tools"><span>横截面</span><select id="seg-count">${Array.from({length:11},(_,i)=>i+2).map(n=>`<option value="${n}" ${n===cfg.radii.length?'selected':''}>${n} 段</option>`).join('')}</select><button class="small" id="seg-reset">重置此段</button></div><div id="radius-fields"></div>`;
   const renderRadii=(radii)=>{
     const fields=document.querySelector('#radius-fields');
@@ -209,9 +283,14 @@ function segmentEditor(){
     fields.querySelectorAll('input').forEach((input)=>{input.oninput=()=>{input.nextElementSibling.textContent=Number(input.value).toFixed(2);};input.onchange=()=>apply(currentRadii());});
   };
   const currentRadii=()=>[...document.querySelectorAll('[data-radius]')].map((input)=>Number(input.value));
-  const currentLength=()=>lengthEnabled?Number(document.querySelector('#seg-length').value):1;
+  // locked: keep the exact fitted length, never the slider's 2-decimal rounding
+  const currentLength=()=>referenceLocked?Number(cfg.length):(lengthEnabled?Number(document.querySelector('#seg-length').value):1);
   const apply=(radii)=>applySegment(child,currentLength(),radii);
   renderRadii(cfg.radii);
+  if(referenceLocked){
+    const row=document.querySelector('#seg-length-row');
+    if(row)row.onclick=warnLocked;
+  }
   if(lengthEnabled){const length=document.querySelector('#seg-length');length.oninput=()=>{document.querySelector('#seg-length-value').textContent=Number(length.value).toFixed(2);};length.onchange=()=>apply(currentRadii());}
   document.querySelector('#seg-count').onchange=(event)=>{
     const count=Number(event.target.value),old=currentRadii();
@@ -219,6 +298,7 @@ function segmentEditor(){
     renderRadii(next);apply(next);
   };
   document.querySelector('#seg-reset').onclick=async()=>{
+    if(referenceLocked){warnLocked();return;}
     setStatus('正在重置当前骨段...');
     try{
       const response=await fetch('/api/segment/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,child})});
@@ -394,7 +474,8 @@ async function load(gender,edited=false,force=false){
     ensureOwners(gender);
     if(shouldFrame)frame(obj);
     document.querySelector('#reset').disabled=false;
-    setStatus('已加载 '+gender+'，可拖动黄色身体关节');
+    setStatus(referenceLocked?'已加载 '+gender+'（骨架已锁定，移除图片后可编辑）':'已加载 '+gender+'，可拖动黄色身体关节');
+    maybeSolveReference();
   }catch(e){setStatus('加载失败：'+e.message,true);}
 }
 function updatePointer(event){const r=canvas.getBoundingClientRect();pointer.set((event.clientX-r.left)/r.width*2-1,-((event.clientY-r.top)/r.height)*2+1);raycaster.setFromCamera(pointer,camera)}
@@ -405,6 +486,7 @@ canvas.addEventListener('pointerdown',(event)=>{
   updatePointer(event);
   const hit=raycaster.intersectObjects(jointPickers,false)[0];
   if(hit){
+    if(referenceLocked){warnLocked();event.preventDefault();return;}
     const joint=hit.object;
     drag={joint:joint.userData.joint,dot:joint};
     gesture.joint=true;
@@ -465,7 +547,7 @@ canvas.addEventListener('pointerup',async (event)=>{
   // a modification and leaves the selection alone.
   if(finished&&!finished.moved&&!finished.boneHit&&!finished.joint)clearSegmentSelection();
 });
-document.querySelector('#reset').onclick=async()=>{if(!selected)return;const button=document.querySelector('#reset');button.disabled=true;setStatus('正在重置当前姿态...');try{const response=await fetch('/api/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected})});if(!response.ok)throw Error(await response.text());const result=await response.json();if(!result.ok)throw Error('重置未完成');selectedSegment=null;await load(selected,true,true);setStatus('已重置为默认 SMPL-X 姿态');}catch(error){setStatus('重置失败：'+error.message,true);button.disabled=false;}};
+document.querySelector('#reset').onclick=async()=>{if(!selected)return;if(referenceLocked){warnLocked();return;}const button=document.querySelector('#reset');button.disabled=true;setStatus('正在重置当前姿态...');try{const response=await fetch('/api/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected})});if(!response.ok)throw Error(await response.text());const result=await response.json();if(!result.ok)throw Error('重置未完成');selectedSegment=null;await load(selected,true,true);setStatus('已重置为默认 SMPL-X 姿态');}catch(error){setStatus('重置失败：'+error.message,true);button.disabled=false;}};
 const refInput=document.querySelector('#ref-file'), refPick=document.querySelector('#ref-pick'), refClear=document.querySelector('#ref-clear'), refHide=document.querySelector('#ref-hide');
 refPick.onclick=()=>refInput.click();
 refInput.onchange=()=>{const file=refInput.files&&refInput.files[0];refInput.value='';if(file)showReferenceFile(file);};
@@ -945,6 +1027,13 @@ class ModelCache:
         scale = float(fit.get("scale") or 0.0)
         if not np.isfinite(scale) or scale <= 1e-6:
             raise ValueError("检测到的像素/米比例无效")
+        joints = {}
+        for entry in (result.get("joints") or {}).values():
+            index = entry.get("smplx_index")
+            xy = entry.get("xy")
+            if index is None or xy is None or not (0 <= int(index) <= 22):
+                continue
+            joints[str(int(index))] = [float(xy[0]), float(xy[1])]
         return {
             "ok": True,
             "eye_midpoint": [float(midpoint[0]), float(midpoint[1])],
@@ -953,7 +1042,109 @@ class ModelCache:
             "pixels_per_meter": scale,
             "image_width": int(result["image_width"]),
             "image_height": int(result["image_height"]),
+            "joints": joints,
             "elapsed_ms": result.get("elapsed_ms"),
+        }
+
+
+    def solve_reference_lengths(self, gender: str, pixels_per_meter: float,
+                                eye_midpoint, joints: dict) -> dict:
+        """Fit the 21 editable bone lengths so the model's joints land on the picture.
+
+        The picture already sits on the model's eye midpoint, so every joint is
+        compared *relative to the eyes*: that removes the ground-offset and the
+        plane translation from the problem and makes the fit independent of how
+        the picture is placed.
+
+        With ``J_i = J_root + sum_{k in path(i)} v_k * L_k`` (``v_k`` = the posed
+        bone vector, ``L_k`` the length factor -- exactly how ``_geometry`` builds
+        the joints), the constraint ``J_i - J_eye = delta_i`` is **linear** in
+        ``L``, so it is one least-squares solve with a light pull towards 1.
+        """
+        if gender not in GENDERS or not self.available(gender):
+            raise FileNotFoundError(gender)
+        mpp = 1.0 / float(pixels_per_meter)
+        if not np.isfinite(mpp) or mpp <= 0 or not np.isfinite(float(pixels_per_meter)):
+            raise ValueError("invalid pixels_per_meter")
+        model, output = self._output(gender)
+        base = output.joints[0, :len(model.parents)].detach().cpu().numpy().astype(np.float64)
+        parents = model.parents.cpu().numpy().astype(np.int64)
+        bones = [k for k in range(1, 22) if parents[k] >= 0]
+        slot = {k: i for i, k in enumerate(bones)}
+        vectors = {k: base[k] - base[int(parents[k])] for k in bones}
+
+        # J_eye = J_15 + eye_offset; the 15->23/24 bones are not editable.
+        eye_offset = (base[23] + base[24]) / 2.0 - base[15]
+
+        def path(joint: int) -> list[int]:
+            chain = []
+            while joint > 0:
+                chain.append(joint)
+                joint = int(parents[joint])
+            return chain
+
+        def row_for(joint: int) -> np.ndarray:
+            row = np.zeros((2, len(bones)))
+            for k in path(joint):
+                if k in slot:
+                    row[0, slot[k]] += vectors[k][0]
+                    row[1, slot[k]] += vectors[k][1]
+            return row
+
+        eye_row = row_for(15)
+        rows, rhs = [], []
+        used = 0
+        for key, xy in joints.items():
+            joint = int(key)
+            if joint < 0 or joint > 22 or len(xy) != 2:
+                continue
+            target = np.array([(float(xy[0]) - eye_midpoint[0]) * mpp,
+                               (eye_midpoint[1] - float(xy[1])) * mpp])
+            a = row_for(joint) - eye_row
+            b = target + eye_offset[:2]
+            rows.append(a[0]); rhs.append(b[0])
+            rows.append(a[1]); rhs.append(b[1])
+            used += 1
+        if used < 4:
+            raise ValueError("not enough 2D joints to fit the skeleton")
+
+        design = np.asarray(rows)
+        values = np.asarray(rhs)
+        lam = 0.15
+        design = np.vstack([design, lam * np.eye(len(bones))])
+        values = np.concatenate([values, lam * np.ones(len(bones))])
+        factors, *_ = np.linalg.lstsq(design, values, rcond=None)
+        factors = np.clip(factors, 0.25, 4.0)
+
+        with self.lock:
+            config = self._segments(gender)
+            for k, factor in zip(bones, factors):
+                entry = dict(config.get(str(k), {}))
+                entry["length"] = float(factor)
+                entry.setdefault("radii", [1.0, 1.0, 1.0])
+                config[str(k)] = entry
+            self._invalidate_geometry(gender)
+            _model, vertices, new_joints, _parents = self._geometry(gender)
+
+        # residual measured on the geometry that will actually be rendered
+        eye = (new_joints[23] + new_joints[24]) / 2.0
+        errors = []
+        for key, xy in joints.items():
+            joint = int(key)
+            if joint < 0 or joint > 22 or len(xy) != 2:
+                continue
+            predicted = np.array([
+                eye_midpoint[0] + (new_joints[joint][0] - eye[0]) / mpp,
+                eye_midpoint[1] - (new_joints[joint][1] - eye[1]) / mpp,
+            ])
+            errors.append(float(np.hypot(predicted[0] - xy[0], predicted[1] - xy[1])))
+        errors = np.asarray(errors) if errors else np.zeros(1)
+        return {
+            "ok": True,
+            "lengths": {str(k): float(f) for k, f in zip(bones, factors)},
+            "num_joints": int(used),
+            "rms_px": float(np.sqrt((errors ** 2).mean())),
+            "max_px": float(errors.max()),
         }
 
     def owners(self, gender: str) -> bytes:
@@ -1125,6 +1316,15 @@ def handler_factory(cache: ModelCache):
                 if path == "/api/segment/reset":
                     cache.reset_segment(gender, int(data["child"]))
                     self.send_json({"ok": True})
+                    return
+                if path == "/api/reference/solve":
+                    result = cache.solve_reference_lengths(
+                        gender,
+                        float(data["pixels_per_meter"]),
+                        [float(v) for v in data["eye_midpoint"]],
+                        {str(k): [float(a), float(b)] for k, (a, b) in data["joints"].items()},
+                    )
+                    self.send_json(result)
                     return
                 self.send_error(HTTPStatus.NOT_FOUND)
             except FileNotFoundError:
