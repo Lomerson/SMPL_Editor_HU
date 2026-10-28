@@ -302,17 +302,19 @@ function segmentEditor(){
     renderRadii(next);apply(next);
   };
   document.querySelector('#seg-reset').onclick=async()=>{
-    if(referenceLocked){warnLocked();return;}
-    setStatus('正在重置当前骨段...');
+    // locked: the fitted length is owned by the picture, only the cross-section
+    // is reset; unlocked: length and cross-section are both restored.
+    const keepLength=referenceLocked;
+    setStatus(keepLength?'正在重置横截面（保留对齐长度）...':'正在重置当前骨段...');
     try{
-      const response=await fetch('/api/segment/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,child})});
+      const response=await fetch('/api/segment/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,child,keep_length:keepLength})});
       if(!response.ok)throw Error(await response.text());
       const result=await response.json();
       if(!result.ok)throw Error('骨段重置未完成');
       await load(selected,true,true);
       selectedSegment=child;
       segmentEditor();
-      setStatus('已重置当前骨段');
+      setStatus(keepLength?'已重置横截面（骨骼长度保持对齐结果）':'已重置当前骨段（长度与横截面）');
     }catch(error){setStatus('骨段重置失败：'+error.message,true);}
   };
   updateSelectionVisuals();
@@ -932,13 +934,25 @@ class ModelCache:
             }
             self._invalidate_geometry(gender)
 
-    def reset_segment(self, gender: str, child: int):
+    def reset_segment(self, gender: str, child: int, keep_length: bool = False):
+        """Reset a segment.
+
+        ``keep_length=False`` restores both the bone length and the cross-section
+        (the editor's normal "重置此段").  ``keep_length=True`` only clears the
+        cross-section and leaves the length alone -- that is what the button does
+        while a reference picture owns the lengths: the fit must survive, the
+        girth may be reset.
+        """
         if gender not in GENDERS or not self.available(gender):
             raise FileNotFoundError(gender)
         if child < 1 or child > 21:
             raise ValueError("Invalid body segment")
         with self.lock:
-            self._segments(gender).pop(str(child), None)
+            entry = self._segments(gender).get(str(child))
+            if keep_length and entry is not None:
+                entry["radii"] = [1.0, 1.0, 1.0]
+            else:
+                self._segments(gender).pop(str(child), None)
             self._invalidate_geometry(gender)
 
     def reset(self, gender: str):
@@ -1538,7 +1552,10 @@ def handler_factory(cache: ModelCache):
                     self.send_json({"ok": True})
                     return
                 if path == "/api/segment/reset":
-                    cache.reset_segment(gender, int(data["child"]))
+                    cache.reset_segment(
+                        gender, int(data["child"]),
+                        keep_length=bool(data.get("keep_length", False)),
+                    )
                     self.send_json({"ok": True})
                     return
                 if path == "/api/reference/solve":
