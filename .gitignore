@@ -1,7 +1,7 @@
 legacy/
 outputs/
 
-RUN_REPORT.md
+*.md
 run_local.sh
 
 # # 忽略所有日志文件

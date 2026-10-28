@@ -101,7 +101,10 @@ function refreshReferenceInfo(){
     const L=referenceLayout;
     bits.push(`${L.label} · ${L.imgW}×${L.imgH} px · ${L.pxPerM.toFixed(1)} px/m`);
     if(referenceStatus)bits.push(referenceStatus);
-    if(referenceSolveInfo)bits.push(`骨骼残差 ${referenceSolveInfo.rms.toFixed(1)} px`);
+    if(referenceSolveInfo){
+      bits.push(`骨骼残差 ${referenceSolveInfo.rms.toFixed(1)} px（长度拟合 ${referenceSolveInfo.lengths.toFixed(1)} px）`);
+      if(referenceSolveInfo.z!==undefined&&referenceSolveInfo.z!==null)bits.push(`z 漂移 ${(referenceSolveInfo.z*1000).toFixed(2)} mm`);
+    }
   }else{
     bits.push('未检测到双眼，按 1 px = 1 mm 放在模型中心');
   }
@@ -205,9 +208,10 @@ async function maybeSolveReference(){
     })});
     if(!response.ok)throw Error((await response.text()).slice(0,160));
     const data=await response.json();
-    referenceSolveInfo={rms:data.rms_px,max:data.max_px,count:data.num_joints};
     await load(selected,true,true);
-    setStatus(`骨架已按参考图锁定（${data.num_joints} 个关节，残差 ${data.rms_px.toFixed(1)} px / 最大 ${data.max_px.toFixed(1)} px）`);
+    referenceSolveInfo={rms:data.rms_px,max:data.max_px,count:data.num_joints,lengths:data.lengths_rms_px,moved:(data.pose_moved||[]).length,full:data.full_body,z:data.z_drift_m};
+    refreshReferenceInfo();
+    setStatus(`骨架已按参考图锁定（${data.num_joints} 关节；长度拟合 ${data.lengths_rms_px.toFixed(1)} px → ${data.full_body?'全身':'局部'} IK 后 ${data.rms_px.toFixed(1)} px / 最大 ${data.max_px.toFixed(1)} px）`);
   }catch(error){
     referenceSolveInfo=null;
     refreshReferenceInfo();
@@ -578,6 +582,12 @@ JOINT_NAMES = [
 
 DEVICE_CHOICES = ("auto", "cpu", "cuda")
 
+#: Pose-refinement pass of the reference alignment.  ``False`` runs the
+#: per-joint IK with the "全身 IK" chain disabled (each joint is placed by
+#: rotating its direct parent only); set it to ``True`` to re-run the same
+#: sweep with the full parent chain solved together.
+REFERENCE_IK_FULL_BODY = True
+
 
 def resolve_device(requested: str = "auto") -> tuple[str, str]:
     """Decide where SMPL-X inference runs, before any weights are loaded.
@@ -630,6 +640,7 @@ class ModelCache:
         self.device = device if device in ("cpu", "cuda") else "cpu"
         self.lock = threading.Lock()
         self.poses = {}
+        self.global_orients = {}
         self.models = {}
         self.outputs = {}
         self.segment_configs = {}
@@ -694,13 +705,24 @@ class ModelCache:
             )
         return self.poses[gender]
 
+    def _orient(self, gender: str, model):
+        import torch
+        if gender not in self.global_orients:
+            self.global_orients[gender] = torch.zeros(
+                (1, 3), dtype=torch.float32, device=self.device
+            )
+        return self.global_orients[gender]
+
     def _output(self, gender: str):
         import torch
         if gender in self.outputs:
             return self._model(gender), self.outputs[gender]
         model = self._model(gender)
         with torch.no_grad():
-            output = model(body_pose=self._pose(gender, model))
+            output = model(
+                body_pose=self._pose(gender, model),
+                global_orient=self._orient(gender, model),
+            )
         self.outputs[gender] = output
         return model, output
 
@@ -928,11 +950,13 @@ class ModelCache:
             self.poses[gender] = torch.zeros(
                 (1, model.NUM_BODY_JOINTS * 3), dtype=torch.float32, device=self.device
             )
+            self.global_orients.pop(gender, None)
             self.segment_configs.pop(gender, None)
             self.outputs.pop(gender, None)
             self._invalidate_geometry(gender)
 
-    def pose_joint(self, gender: str, joint: int, target: list[float], full_body: bool):
+    def pose_joint(self, gender: str, joint: int, target: list[float], full_body: bool,
+                   iterations: int | None = None):
         if gender not in GENDERS or not self.available(gender):
             raise FileNotFoundError(gender)
         if joint < 1 or joint > 21:
@@ -961,26 +985,48 @@ class ModelCache:
             target_tensor = torch.tensor(
                 target, dtype=torch.float32, device=self.device
             ).view(1, 3)
-            with torch.no_grad():
-                initial = model(body_pose=base).joints[:, :len(parents)]
+            # The visible skeleton is the *length-scaled* one (segment editor), so
+            # the solver has to compare against that same joint, not the raw one.
+            factors = np.ones(len(parents), dtype=np.float32)
+            segment_config = self._segments(gender)
+            for index in range(1, min(22, len(parents))):
+                factors[index] = float(
+                    segment_config.get(str(index), {}).get("length", 1.0)
+                )
+            lengths = torch.tensor(factors, dtype=torch.float32, device=self.device)
+            chain_to_joint = []
+            cursor = joint
+            while cursor > 0:
+                chain_to_joint.append(cursor)
+                cursor = parents[cursor]
+            chain_to_joint.reverse()
+
+            def scaled_position(output):
+                joints = output.joints[0]
+                position = joints[0]
+                for node in chain_to_joint:
+                    parent_index = parents[node]
+                    position = position + (joints[node] - joints[parent_index]) * lengths[node]
+                return position
+
             optimizer = torch.optim.Adam([variables], lr=0.035)
             editable = torch.zeros_like(variables)
             for node in chain:
                 editable[:, (node - 1) * 3:node * 3] = 1
-            for _ in range(36 if full_body else 24):
+            global_orient = self._orient(gender, model)
+            for _ in range(iterations if iterations is not None else (36 if full_body else 24)):
                 optimizer.zero_grad(set_to_none=True)
                 pose = variables * editable + base * (1 - editable)
-                output = model(body_pose=pose)
-                if full_body:
-                    loss = (output.joints[:, joint] - target_tensor).square().sum()
-                else:
-                    loss = (output.joints[:, joint] - target_tensor).square().sum()
+                output = model(body_pose=pose, global_orient=global_orient)
+                loss = (scaled_position(output) - target_tensor[0]).square().sum()
                 loss = loss + 0.003 * ((pose - base) * editable).square().mean()
                 loss.backward()
                 optimizer.step()
             self.poses[gender] = (variables.detach() * editable + base * (1 - editable))
             with torch.no_grad():
-                self.outputs[gender] = model(body_pose=self.poses[gender])
+                self.outputs[gender] = model(
+                    body_pose=self.poses[gender], global_orient=global_orient
+                )
             self._invalidate_geometry(gender)
 
 
@@ -1048,7 +1094,8 @@ class ModelCache:
 
 
     def solve_reference_lengths(self, gender: str, pixels_per_meter: float,
-                                eye_midpoint, joints: dict) -> dict:
+                                eye_midpoint, joints: dict,
+                                z_weight: float = 3.0) -> dict:
         """Fit the 21 editable bone lengths so the model's joints land on the picture.
 
         The picture already sits on the model's eye midpoint, so every joint is
@@ -1084,11 +1131,12 @@ class ModelCache:
             return chain
 
         def row_for(joint: int) -> np.ndarray:
-            row = np.zeros((2, len(bones)))
+            row = np.zeros((3, len(bones)))
             for k in path(joint):
                 if k in slot:
                     row[0, slot[k]] += vectors[k][0]
                     row[1, slot[k]] += vectors[k][1]
+                    row[2, slot[k]] += vectors[k][2]
             return row
 
         eye_row = row_for(15)
@@ -1100,10 +1148,14 @@ class ModelCache:
                 continue
             target = np.array([(float(xy[0]) - eye_midpoint[0]) * mpp,
                                (eye_midpoint[1] - float(xy[1])) * mpp])
-            a = row_for(joint) - eye_row
+            full = row_for(joint)
+            a = full[:2] - eye_row[:2]
             b = target + eye_offset[:2]
-            rows.append(a[0]); rhs.append(b[0])
-            rows.append(a[1]); rhs.append(b[1])
+            rows.append(a[0]); rhs.append(b[0] * 1.0)
+            rows.append(a[1]); rhs.append(b[1] * 1.0)
+            # keep the joint's own depth: sum(v_kz * L_k) == sum(v_kz)
+            rows.append(full[2] * z_weight)
+            rhs.append(float((full[2]).sum()) * z_weight)
             used += 1
         if used < 4:
             raise ValueError("not enough 2D joints to fit the skeleton")
@@ -1127,6 +1179,21 @@ class ModelCache:
             _model, vertices, new_joints, _parents = self._geometry(gender)
 
         # residual measured on the geometry that will actually be rendered
+        rms_px, max_px = self._reference_residual(
+            gender, pixels_per_meter, eye_midpoint, joints
+        )
+        return {
+            "ok": True,
+            "lengths": {str(k): float(f) for k, f in zip(bones, factors)},
+            "num_joints": int(used),
+            "rms_px": rms_px,
+            "max_px": max_px,
+        }
+
+    def _reference_residual(self, gender, pixels_per_meter, eye_midpoint, joints):
+        """RMS / max pixel error of the joints on the geometry being rendered."""
+        mpp = 1.0 / float(pixels_per_meter)
+        _model, _vertices, new_joints, _parents = self._geometry(gender)
         eye = (new_joints[23] + new_joints[24]) / 2.0
         errors = []
         for key, xy in joints.items():
@@ -1139,12 +1206,169 @@ class ModelCache:
             ])
             errors.append(float(np.hypot(predicted[0] - xy[0], predicted[1] - xy[1])))
         errors = np.asarray(errors) if errors else np.zeros(1)
+        return float(np.sqrt((errors ** 2).mean())), float(errors.max())
+
+    def _scaled_joints(self, model, body_pose, lengths, global_orient=None):
+        """Joints of the *rendered* skeleton: segment lengths applied on top.
+
+        Mirrors ``_geometry``: ``S[k] = S[parent] + (J[k] - J[parent]) * L[k]``.
+        """
+        output = model(body_pose=body_pose, global_orient=global_orient)
+        joints = output.joints[0][:len(model.parents)]
+        scaled = joints.clone()
+        parents = model.parents
+        for index in range(1, len(parents)):
+            parent = int(parents[index])
+            if parent < 0:
+                continue
+            scaled[index] = scaled[parent] + (joints[index] - joints[parent]) * lengths[index]
+        return scaled
+
+    def refine_pose_to_reference(self, gender: str, pixels_per_meter: float,
+                                 eye_midpoint, joints: dict,
+                                 full_body: bool | None = None,
+                                 iterations: int = 160,
+                                 learning_rate: float = 0.02,
+                                 reference_z: dict | None = None,
+                                 z_weight: float = 20.0) -> dict:
+        """Second stage: let the *pose* absorb what the bone lengths cannot.
+
+        Note on "全身 IK": running the viewer's per-joint drag solver in a sweep
+        (rotate only the direct parent, checkbox off) is unusable for the torso
+        -- rotating a spine joint to fix the neck swings the whole upper body and
+        the error explodes (measured: 17 px -> 251 px over one sweep).  The pose
+        is therefore solved as a single least-squares problem over the 21 body
+        joint rotations, which is stable and never ships a worse pose.
+
+        Each joint is pulled to its picture ``(x, y)`` **inside its own plane**:
+        the target depth stays the joint's original ``z`` (``reference_z``), so
+        the alignment never tilts the body through the depth axis.
+
+        ``REFERENCE_IK_FULL_BODY`` picks how much chain participates:
+        ``False`` keeps the pelvis/root fixed (only the joints rotate locally);
+        ``True`` also frees the root orientation, i.e. the whole body may turn.
+        """
+        if full_body is None:
+            full_body = REFERENCE_IK_FULL_BODY
+        import torch
+        model = self._model(gender)
+        mpp = 1.0 / float(pixels_per_meter)
+        deltas, indexes = [], []
+        for key, xy in joints.items():
+            index = int(key)
+            if 0 <= index <= 22 and len(xy) == 2:
+                deltas.append([(float(xy[0]) - eye_midpoint[0]) * mpp,
+                               (eye_midpoint[1] - float(xy[1])) * mpp])
+                indexes.append(index)
+        if not indexes:
+            raise ValueError("no 2D joints to refine the pose with")
+        target = torch.tensor(deltas, dtype=torch.float32, device=self.device)
+        joint_ids = torch.tensor(indexes, dtype=torch.long, device=self.device)
+        if reference_z is None:
+            _model0, _v0, current0, _p0 = self._geometry(gender)
+            reference_z = {index: float(current0[index][2]) for index in indexes}
+        target_z = torch.tensor(
+            [float(reference_z[index]) for index in indexes],
+            dtype=torch.float32, device=self.device,
+        )
+
+        factors = np.ones(len(model.parents), dtype=np.float32)
+        config = self._segments(gender)
+        for index in range(1, 22):
+            factors[index] = float(config.get(str(index), {}).get("length", 1.0))
+        lengths = torch.tensor(factors, dtype=torch.float32, device=self.device)
+
+        with self.lock:
+            pose0 = self._pose(gender, model).clone()
+            orient0 = self._orient(gender, model).clone()
+            before, _ = self._reference_residual(
+                gender, pixels_per_meter, eye_midpoint, joints
+            )
+            variables = torch.nn.Parameter(pose0.clone())
+            parameters = [variables]
+            root = None
+            if full_body:
+                root = torch.nn.Parameter(orient0.clone())
+                parameters.append(root)
+            optimizer = torch.optim.Adam(parameters, lr=learning_rate)
+            for _ in range(iterations):
+                optimizer.zero_grad(set_to_none=True)
+                scaled = self._scaled_joints(
+                    model, variables, lengths,
+                    root if root is not None else None,
+                )
+                eye = (scaled[23] + scaled[24]) / 2.0
+                points = scaled[joint_ids]
+                residual = (points[:, :2] - eye[:2]) - target
+                depth = points[:, 2] - target_z          # keep each joint in its own plane
+                loss = residual.square().sum() + z_weight * depth.square().sum()
+                loss = loss + 0.02 * (variables - pose0).square().mean()
+                loss.backward()
+                optimizer.step()
+            with torch.no_grad():
+                self.poses[gender] = variables.detach().clone()
+                if root is not None:
+                    self.global_orients[gender] = root.detach().clone()
+                self.outputs[gender] = model(
+                    body_pose=self.poses[gender],
+                    global_orient=self.global_orients.get(gender),
+                )
+            self._invalidate_geometry(gender)
+            after, _ = self._reference_residual(
+                gender, pixels_per_meter, eye_midpoint, joints
+            )
+            if after > before:                      # never ship a worse pose
+                self.poses[gender] = pose0
+                self.global_orients[gender] = orient0
+                self.outputs.pop(gender, None)
+                self._invalidate_geometry(gender)
+                after = before
+
+        return {
+            "moved": [int(v) for v in indexes],
+            "skipped": [],
+            "full_body": bool(full_body),
+            "rms_before_px": float(before),
+            "pose_rms_px": float(after),
+        }
+
+    def align_reference(self, gender: str, pixels_per_meter: float,
+                        eye_midpoint, joints: dict,
+                        full_body: bool | None = None) -> dict:
+        """Whole reference alignment: bone lengths first, then the pose pass.
+
+        Each joint keeps the depth it had before the alignment (``reference_z``),
+        so the fit happens inside the joint's own xy plane and the body is never
+        tilted through the z axis.
+        """
+        model, base_output = self._output(gender)
+        base_joints = base_output.joints[0].detach().cpu().numpy()
+        reference_z = {index: float(base_joints[index][2]) for index in range(23)}
+        fit = self.solve_reference_lengths(gender, pixels_per_meter, eye_midpoint, joints)
+        lengths_fit = {"rms_px": fit["rms_px"], "max_px": fit["max_px"]}
+        pose = self.refine_pose_to_reference(
+            gender, pixels_per_meter, eye_midpoint, joints,
+            full_body=full_body, reference_z=reference_z,
+        )
+        rms_px, max_px = self._reference_residual(
+            gender, pixels_per_meter, eye_midpoint, joints
+        )
+        _model, _vertices, current, _parents = self._geometry(gender)
+        z_drift = max(
+            abs(float(current[index][2]) - reference_z[index]) for index in reference_z
+        )
         return {
             "ok": True,
-            "lengths": {str(k): float(f) for k, f in zip(bones, factors)},
-            "num_joints": int(used),
-            "rms_px": float(np.sqrt((errors ** 2).mean())),
-            "max_px": float(errors.max()),
+            "lengths": fit["lengths"],
+            "num_joints": fit["num_joints"],
+            "rms_px": rms_px,
+            "max_px": max_px,
+            "lengths_rms_px": lengths_fit["rms_px"],
+            "lengths_max_px": lengths_fit["max_px"],
+            "z_drift_m": float(z_drift),
+            "pose_moved": pose["moved"],
+            "pose_skipped": pose["skipped"],
+            "full_body": pose["full_body"],
         }
 
     def owners(self, gender: str) -> bytes:
@@ -1318,11 +1542,13 @@ def handler_factory(cache: ModelCache):
                     self.send_json({"ok": True})
                     return
                 if path == "/api/reference/solve":
-                    result = cache.solve_reference_lengths(
+                    override = data.get("full_body")
+                    result = cache.align_reference(
                         gender,
                         float(data["pixels_per_meter"]),
                         [float(v) for v in data["eye_midpoint"]],
                         {str(k): [float(a), float(b)] for k, (a, b) in data["joints"].items()},
+                        full_body=None if override is None else bool(override),
                     )
                     self.send_json(result)
                     return
