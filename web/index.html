@@ -1,0 +1,600 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SMPL-X T-pose 预览</title>
+<style>
+  :root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; }
+  * { box-sizing: border-box; } html,body,#app { margin:0; width:100%; height:100%; overflow:hidden; }
+  body { background:#111318; color:#edf0f5; } #app { display:grid; grid-template-columns:300px minmax(0,1fr); grid-template-rows:100%; }
+  /* the console scrolls on its own so a growing panel never resizes the canvas */
+  aside { overflow-y:auto; min-height:0; }
+  aside { background:#1a1e25; border-right:1px solid #303642; padding:24px 18px; display:flex; flex-direction:column; gap:22px; }
+  h1 { font-size:18px; margin:0; } .sub { color:#aeb7c6; font-size:13px; line-height:1.55; margin:8px 0 0; }
+  .section-title { display:block; color:#f4f6fa; font-size:16px; font-weight:700; margin:0; }
+  .panel { border:1px solid #2b313c; border-radius:8px; background:#171b22; padding:0 12px 12px; }
+  .panel > summary { list-style:none; cursor:pointer; user-select:none; padding:12px 0 10px; display:flex; align-items:center; justify-content:space-between; }
+  .panel > summary::-webkit-details-marker { display:none; }
+  .panel > summary::after { content:'\25BE'; color:#8f99a9; font-size:11px; transition:transform .15s ease; }
+  .panel:not([open]) > summary::after { transform:rotate(-90deg); }
+  .panel[open] > summary { margin-bottom:10px; }
+  .panel:not([open]) { padding-bottom:0; }
+  .brand h1 { margin:0; } select { width:100%; min-height:43px; border:1px solid #414957; border-radius:6px; background:#252b35; color:#eff2f7; padding:0 11px; font-size:14px; cursor:pointer; }
+  button { border:1px solid #414957; border-radius:6px; background:#252b35; color:#eff2f7; min-height:43px; padding:0 12px; font-size:14px; text-align:left; cursor:pointer; }
+  button:hover:not(:disabled) { border-color:#7da6ef; background:#293544; } button.active { color:#fff; background:#24559a; border-color:#70a5f3; }
+  button:disabled { color:#697383; cursor:not-allowed; } #status { margin-top:auto; color:#aeb7c6; font-size:12px; line-height:1.55; }
+  main { min-width:0; min-height:0; position:relative; } canvas { display:block; width:100%; height:100%; }
+  .hud { position:absolute; top:18px; right:18px; background:#1a1e25e8; border:1px solid #343b47; border-radius:6px; padding:11px 13px; color:#b9c2d0; font-size:12px; line-height:1.55; }
+  .pose-controls { display:flex; gap:8px; align-items:stretch; } .toggle { display:flex; align-items:center; gap:7px; min-height:38px; flex:1; padding:0 10px; border:1px solid #414957; border-radius:6px; background:#252b35; font-size:14px; cursor:pointer; white-space:nowrap; } .toggle input { width:16px; height:16px; accent-color:#70a5f3; } #reset { min-height:38px; padding:0 10px; font-size:13px; white-space:nowrap; }
+  .segment-empty { color:#8f99a9; font-size:13px; } .segment-name { color:#d9e5f8; font-size:13px; margin:0 0 10px; } .field { display:grid; grid-template-columns:62px minmax(0,1fr) 48px; gap:7px; align-items:center; margin:8px 0; font-size:12px; color:#b9c3d0; } input[type=range] { width:100%; accent-color:#70a5f3; } .value { color:#f1f4f8; text-align:right; font-variant-numeric:tabular-nums; } .segment-tools { display:flex; gap:8px; align-items:center; margin:10px 0 4px; } .segment-tools select { flex:1; min-height:34px; font-size:13px; } .small { min-height:34px; padding:0 10px; font-size:12px; } .selected-bone { color:#fff1b3; }
+  .error { color:#ffabb8 !important; }
+  #toasts { position:fixed; right:18px; bottom:18px; display:flex; flex-direction:column; gap:8px; z-index:60; pointer-events:none; align-items:flex-end; }
+  .toast { background:#f2c94c; color:#241c00; font-size:13px; line-height:1.45; padding:10px 14px; border-radius:6px; box-shadow:0 6px 18px rgba(0,0,0,.35); max-width:320px; transition:opacity .25s ease, transform .25s ease; }
+  .toast.out { opacity:0; transform:translateY(6px); }
+  button.locked { opacity:.45; cursor:not-allowed; }
+  .skeleton-locked #seg-length { opacity:.5; }
+  .slider-field { display:grid; grid-template-columns:44px 20px minmax(0,1fr) 20px 40px; gap:6px; align-items:center; margin:8px 0; font-size:12px; color:#b9c3d0; }
+  .step-btn { width:20px; height:20px; min-height:0; padding:0; border:1px solid #414957; border-radius:4px; background:#252b35; color:#eff2f7; font-size:13px; line-height:1; display:flex; align-items:center; justify-content:center; text-align:center; cursor:pointer; }
+  .step-btn:hover:not(:disabled) { border-color:#7da6ef; background:#293544; }
+  .step-btn:disabled { color:#697383; cursor:not-allowed; opacity:.5; }
+  .skeleton-locked #seg-length-row { cursor:not-allowed; } .ref-row { display:flex; gap:8px; align-items:stretch; } #ref-pick { flex:1 1 auto; min-width:0; text-align:center; } #ref-hide, #ref-clear { flex:0 0 62px; min-width:62px; text-align:center; } #ref-file { display:none; } .ref-info { margin:8px 0 0; } @media(max-width:700px) { #app{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)} aside{padding:14px; border-right:0; border-bottom:1px solid #303642; gap:12px}.gender{grid-template-columns:repeat(3,1fr)} button{font-size:12px;text-align:center} #status{margin-top:0} }
+</style>
+</head>
+<body><div id="app"><aside>
+  <div><h1>SMPL-X T-pose</h1><p class="sub">选择性别模型。鼠标左键旋转，滚轮缩放，右键平移。</p></div>
+  <details class="panel" open><summary class="section-title">人体模型</summary><select id="gender" aria-label="人体模型"></select></details>
+  <details class="panel" open><summary class="section-title">调整人体姿态</summary><div class="pose-controls"><label class="toggle"><input id="full-body-ik" type="checkbox"> <span>全身 IK</span></label><button id="reset" disabled>重置当前姿态</button></div><p class="sub">关闭时移动所选点及其子节点，父节点保持固定；开启后允许整条父链共同求解。</p></details>
+  <details class="panel" open><summary class="section-title">骨段编辑</summary><div id="segment-editor" class="segment-empty">点击一条黄色骨骼连线以编辑该骨段。</div></details>
+  <details class="panel" open><summary class="section-title">参考图</summary><div class="ref-row"><button id="ref-pick">选择图片</button><button id="ref-hide" class="small" disabled>隐藏</button><button id="ref-clear" class="small" disabled>移除</button></div><input id="ref-file" type="file" accept="image/png,image/jpeg,image/jpg,image/webp,image/bmp,image/gif,image/tiff,image/*"><p class="sub ref-info" id="ref-info">未选择图片。上传后自动用 AnimePoseDetector 对齐双眼。</p></details>
+  <div id="status">正在读取模型信息...</div>
+</aside><main><canvas id="viewer"></canvas><div class="hud">点击黄色身体关节后拖动<br>空白处拖动旋转 · 滚轮缩放</div><div id="toasts"></div></main></div>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+const canvas=document.querySelector('#viewer'), status=document.querySelector('#status'), choices=document.querySelector('#gender');
+const renderer=new THREE.WebGLRenderer({canvas,antialias:true}); renderer.setPixelRatio(Math.min(devicePixelRatio,2)); renderer.setClearColor(0x111318);
+const scene=new THREE.Scene(), camera=new THREE.PerspectiveCamera(38,1,.01,100); camera.position.set(3.2,1.7,5.6);
+const controls=new OrbitControls(camera,renderer.domElement); controls.target.set(0,.82,0); controls.enableDamping=true; controls.minDistance=1.2; controls.maxDistance=10;
+scene.add(new THREE.HemisphereLight(0xddeaff,0x20242c,2.0)); const key=new THREE.DirectionalLight(0xffffff,2.1); key.position.set(3,5,4); scene.add(key);
+const grid=new THREE.GridHelper(8,16,0x4a596f,0x27303b); scene.add(grid); const axes=new THREE.AxesHelper(.45); axes.position.set(-2.5,.01,2.5); scene.add(axes);
+let meshRoot=null, skeletonRoot=null, selected=null, jointPickers=[], segmentLines=null, skeletonData=null, drag=null, selectedSegment=null, revision=0;
+const raycaster=new THREE.Raycaster(), pointer=new THREE.Vector2(), dragPlane=new THREE.Plane();
+function resize(){const r=canvas.getBoundingClientRect();renderer.setSize(r.width,r.height,false);camera.aspect=r.width/r.height;camera.updateProjectionMatrix()} addEventListener('resize',resize); resize();
+function render(){controls.update();renderer.render(scene,camera);requestAnimationFrame(render)} render();
+function setStatus(text,err=false){status.textContent=text;status.className=err?'error':''}
+function frame(root){const box=new THREE.Box3().setFromObject(root), c=box.getCenter(new THREE.Vector3()), s=box.getSize(new THREE.Vector3()); controls.target.set(c.x,c.y,c.z); camera.position.set(c.x,c.y+s.y*.10,c.z+s.y*2.05); controls.update();}
+// ---------------------------- reference picture ----------------------------
+// The picture lives in the xy plane.  AnimePoseDetector reports the eye
+// midpoint in picture pixels plus a pixels-per-metre scale, so the plane is
+// sized to human scale and translated until the picture's eye midpoint lands on
+// the model's eye midpoint (SMPL-X joints 23/24).  The model is never edited.
+let referenceRoot=null, referencePlane=null, referenceLayout=null, referenceURL=null;
+let referenceHidden=false, referenceStatus='', groundOffset=0;
+let referenceTargets=null, referenceToken=0, referenceEpoch=0;
+let referenceSolvedKey=null, referenceSolveInfo=null, referenceLocked=false;
+const EYE_LEFT_JOINT=23, EYE_RIGHT_JOINT=24;
+function refreshReferenceInfo(){
+  const info=document.querySelector('#ref-info');
+  if(!info)return;
+  if(!referenceRoot){info.textContent='未选择图片。上传后自动用 AnimePoseDetector 对齐双眼。';return;}
+  const bits=[];
+  if(referenceLayout){
+    const L=referenceLayout;
+    bits.push(`${L.label} · ${L.imgW}×${L.imgH} px · ${L.pxPerM.toFixed(1)} px/m`);
+    if(referenceStatus)bits.push(referenceStatus);
+    if(referenceSolveInfo){
+      bits.push(`骨骼残差 ${referenceSolveInfo.rms.toFixed(1)} px（长度拟合 ${referenceSolveInfo.lengths.toFixed(1)} px）`);
+      if(referenceSolveInfo.z!==undefined&&referenceSolveInfo.z!==null)bits.push(`z 漂移 ${(referenceSolveInfo.z*1000).toFixed(2)} mm`);
+      if(referenceSolveInfo.tilt!==undefined&&referenceSolveInfo.tilt!==null)bits.push(`眼线 ${referenceSolveInfo.tilt.toFixed(1)}°`);
+    }
+  }else{
+    bits.push('未检测到双眼，按 1 px = 1 mm 放在模型中心');
+  }
+  if(referenceHidden)bits.push('已隐藏');
+  info.textContent=bits.join(' · ');
+}
+function updateReferenceButtons(){
+  const hide=document.querySelector('#ref-hide'), clear=document.querySelector('#ref-clear');
+  const has=!!referencePlane;
+  if(hide){hide.disabled=!has;hide.classList.toggle('active',has&&referenceHidden);}
+  if(clear)clear.disabled=!has;
+}
+function modelEyeWorld(){
+  if(!skeletonData||!skeletonData.joints||skeletonData.joints.length<=EYE_RIGHT_JOINT)return null;
+  const a=skeletonData.joints[EYE_LEFT_JOINT], b=skeletonData.joints[EYE_RIGHT_JOINT];
+  return new THREE.Vector3((a[0]+b[0])/2,(a[1]+b[1])/2+groundOffset,(a[2]+b[2])/2);
+}
+function alignReference(){
+  if(!referenceRoot||!referencePlane||!referenceLayout)return null;
+  const eye=modelEyeWorld();
+  if(!eye)return null;
+  const L=referenceLayout, mpp=1/L.pxPerM;
+  const localX=(L.eyePx[0]-L.imgW/2)*mpp;
+  const localY=(L.imgH/2-L.eyePx[1])*mpp;
+  // The plane keeps its XY orientation (no rotation at all); it is translated
+  // along z as well so the picture's eye midpoint and the model's eye midpoint
+  // coincide in 3D, not just in the projection.
+  referencePlane.position.set(eye.x-localX,eye.y-localY, 0);
+  referenceRoot.updateMatrixWorld(true);
+  const probe=referencePlane.localToWorld(new THREE.Vector3(localX,localY,0));
+  // the picture is pinned to the xy plane, so only the in-plane offset can be
+  // driven to zero -- compare in xy, not in 3D (the eyes sit ~6 cm in front).
+  return Math.hypot(probe.x-eye.x,probe.y-eye.y);
+}
+function realignReference(){
+  if(!referenceRoot||!referenceLayout)return;
+  const err=alignReference();
+  if(err!==null)referenceStatus=`双眼对齐误差 ${(err*1000).toFixed(4)} mm（xy 平面内）`;
+  refreshReferenceInfo();
+}
+function disposeReference(){
+  if(referenceRoot){
+    referenceRoot.traverse((object)=>{if(object.isMesh){object.geometry.dispose();if(object.material.map)object.material.map.dispose();object.material.dispose();}});
+    scene.remove(referenceRoot);
+  }
+  if(referenceURL){URL.revokeObjectURL(referenceURL);referenceURL=null;}
+  referenceRoot=null;referencePlane=null;referenceLayout=null;
+  referenceHidden=false;referenceStatus='';
+  referenceTargets=null;referenceSolvedKey=null;referenceSolveInfo=null;
+  setReferenceLock(false);
+}
+function clearReference(){
+  disposeReference();
+  refreshReferenceInfo();
+  updateReferenceButtons();
+}
+function setReferenceLock(locked){
+  if(referenceLocked===locked)return;
+  referenceLocked=locked;
+  document.body.classList.toggle('skeleton-locked',locked);
+  const reset=document.querySelector('#reset');
+  if(reset)reset.classList.toggle('locked',locked);
+  segmentEditor();
+}
+function pushToast(text){
+  const box=document.querySelector('#toasts');
+  if(!box)return;
+  const toast=document.createElement('div');
+  toast.className='toast';
+  toast.textContent=text;
+  box.appendChild(toast);
+  while(box.children.length>3)box.removeChild(box.firstChild);   // at most 3 stacked
+  setTimeout(()=>{toast.classList.add('out');setTimeout(()=>toast.remove(),260);},3000);
+}
+function warnLocked(){
+  pushToast('骨架已处于锁定状态；请移除图片以继续编辑骨架');
+}
+// Signal hook for future head / eye editors: those move the eyes, so the whole
+// bone-length fit has to be recomputed on the next load.  Call this from any
+// panel that edits the head or the eyes.
+function invalidateReferenceAlignment(){
+  if(!referenceTargets)return;
+  referenceEpoch+=1;
+  referenceSolvedKey=null;
+}
+// Public signal hook: any panel that moves the head / eyes (or otherwise changes
+// joint positions) calls this, and the next load re-fits the bone lengths.
+window.smplxInvalidateReferenceAlignment=invalidateReferenceAlignment;
+async function maybeSolveReference(){
+  if(!referenceTargets||!selected)return;
+  const key=referenceTargets.token+'|'+selected+'|'+referenceEpoch;
+  if(referenceSolvedKey===key)return;
+  referenceSolvedKey=key;
+  setStatus('正在按参考图调整骨骼长度...');
+  try{
+    const response=await fetch('/api/reference/solve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      gender:selected,
+      pixels_per_meter:referenceTargets.mpp,
+      eye_midpoint:referenceTargets.eye,
+      joints:referenceTargets.joints,
+    })});
+    if(!response.ok)throw Error((await response.text()).slice(0,160));
+    const data=await response.json();
+    await load(selected,true,true);
+    referenceSolveInfo={rms:data.rms_px,max:data.max_px,count:data.num_joints,lengths:data.lengths_rms_px,moved:(data.pose_moved||[]).length,full:data.full_body,z:data.z_drift_m,tilt:data.eye_tilt_deg};
+    refreshReferenceInfo();
+    setStatus(`骨架已按参考图锁定（${data.num_joints} 关节；长度拟合 ${data.lengths_rms_px.toFixed(1)} px → ${data.full_body?'全身':'局部'} IK 后 ${data.rms_px.toFixed(1)} px / 最大 ${data.max_px.toFixed(1)} px）`);
+  }catch(error){
+    referenceSolveInfo=null;
+    refreshReferenceInfo();
+    setStatus('参考图骨骼对齐失败：'+error.message,true);
+  }
+}
+async function showReferenceFile(file){
+  const name=file.name||'image';
+  if(!/^image\//.test(file.type)&&!/\.(png|jpe?g|webp|bmp|gif|tiff?)$/i.test(name)){setStatus('不支持的图片格式：'+(file.type||name),true);return;}
+  setStatus('正在用 AnimePoseDetector 分析参考图 '+name+' ...');
+  const url=URL.createObjectURL(file);
+  let image;
+  try{
+    image=await new Promise((resolve,reject)=>{const img=new Image();img.onload=()=>resolve(img);img.onerror=()=>reject(Error('图片解码失败'));img.src=url;});
+  }catch(error){URL.revokeObjectURL(url);setStatus('参考图载入失败：'+error.message,true);return;}
+  let eyes=null, detectorError='';
+  try{
+    const response=await fetch('/api/reference',{method:'POST',headers:{'Content-Type':file.type||'application/octet-stream'},body:file});
+    if(!response.ok)throw Error((await response.text()).slice(0,160));
+    eyes=await response.json();
+  }catch(error){detectorError=error.message;}
+  const imgW=eyes?eyes.image_width:image.naturalWidth;
+  const imgH=eyes?eyes.image_height:image.naturalHeight;
+  const pxPerM=eyes&&eyes.pixels_per_meter>1?eyes.pixels_per_meter:1000;
+  const mpp=1/pxPerM;
+  disposeReference();
+  referenceURL=url;
+  const texture=new THREE.Texture(image);
+  texture.colorSpace=THREE.SRGBColorSpace;
+  texture.anisotropy=renderer.capabilities.getMaxAnisotropy();
+  texture.needsUpdate=true;
+  const material=new THREE.MeshBasicMaterial({map:texture,side:THREE.DoubleSide,depthWrite:false,alphaTest:0.001,toneMapped:false});
+  const plane=new THREE.Mesh(new THREE.PlaneGeometry(imgW*mpp,imgH*mpp),material);
+  plane.renderOrder=-10;          // drawn first, never hides the body
+  referencePlane=plane;
+  referenceRoot=new THREE.Group();
+  referenceRoot.add(plane);
+  scene.add(referenceRoot);
+  if(eyes){
+    referenceLayout={label:name,imgW:imgW,imgH:imgH,eyePx:eyes.eye_midpoint,pxPerM:pxPerM};
+    referenceStatus='';
+    referenceTargets={token:++referenceToken,mpp:pxPerM,eye:eyes.eye_midpoint,joints:eyes.joints||{}};
+    referenceEpoch=0;
+    referenceSolvedKey=null;      // a new picture must always be solved again
+    referenceSolveInfo=null;
+    realignReference();
+    setReferenceLock(true);
+    setStatus('已载入参考图并对齐双眼（joint 23/24）');
+    maybeSolveReference();          // fit the bone lengths to the picture's joints
+  }else{
+    referenceLayout=null;
+    const box=new THREE.Box3().setFromObject(meshRoot||scene), centre=box.getCenter(new THREE.Vector3());
+    plane.position.set(centre.x,centre.y,centre.z);
+    refreshReferenceInfo();
+    setStatus('未检测到双眼，参考图按 1 px = 1 mm 放在模型中心：'+detectorError,true);
+  }
+  updateReferenceButtons();
+}
+
+// ---------------------------- slider template ----------------------------
+// One definition for every segment-editor slider: label, [-] slider [+] and the
+// numeric read-out.  min/max/step come from the call site (never hard-coded
+// here); `enableButtons:false` renders the row without the two step buttons.
+const SLIDER_RADIUS_MIN=0.3, SLIDER_RADIUS_MAX=1.5;
+
+function sliderTemplate({id,label,min,max,step,value,decimals=2,disabled=false,enableButtons=true,attrs=''}){
+  const fmt=(v)=>Number(v).toFixed(decimals);
+  const button=(dir)=>enableButtons
+    ? `<button class="step-btn" type="button" data-step-target="${id}" data-step-dir="${dir}" ${disabled?'disabled':''} aria-label="${dir<0?'减小':'增大'}一个步长">${dir<0?'−':'+'}</button>`
+    : '';
+  return `<div class="slider-field" id="${id}-row" data-slider="${id}">
+      <span class="slider-label">${label}</span>
+      ${button(-1)}
+      <input id="${id}" type="range" min="${min}" max="${max}" step="${step}" value="${value}" ${disabled?'disabled':''} ${attrs}>
+      ${button(1)}
+      <span class="value" id="${id}-value">${fmt(value)}</span>
+    </div>`;
+}
+
+function wireSlider(root,{id,decimals=2,onInput,onChange}){
+  const input=root.querySelector('#'+id);
+  if(!input)return null;
+  const out=root.querySelector('#'+id+'-value');
+  const show=()=>{if(out)out.textContent=Number(input.value).toFixed(decimals);};
+  input.addEventListener('input',()=>{show();if(onInput)onInput();});
+  input.addEventListener('change',()=>{show();if(onChange)onChange();});
+  root.querySelectorAll(`[data-step-target="${id}"]`).forEach((button)=>{
+    button.addEventListener('click',()=>{
+      if(input.disabled)return;
+      const step=parseFloat(input.step)||1;          // step comes from the slider
+      const lo=parseFloat(input.min), hi=parseFloat(input.max);
+      const next=Math.min(hi,Math.max(lo,parseFloat(input.value)+Number(button.dataset.stepDir)*step));
+      input.value=next;                              // the handle moves too
+      show();
+      if(onChange)onChange();
+    });
+  });
+  return input;
+}
+
+function segmentEditor(){
+  const host=document.querySelector('#segment-editor');
+  if(selectedSegment===null||!skeletonData){host.className='segment-empty';host.textContent='点击一条黄色骨骼连线以编辑该骨段。';updateSelectionVisuals();return;}
+  const child=selectedSegment,parent=skeletonData.parents[child];
+  const cfg=skeletonData.segments[String(child)]||{length:1,radii:[1,1,1]};
+  const names=skeletonData.names;
+  host.className='';
+  const lengthEnabled=(child===4||child===5||child===7||child===8||child===18||child===19||child===20||child===21);
+  const lengthMin=Math.min(0.50,cfg.length), lengthMax=Math.max(1.80,cfg.length);
+  const lengthControl=lengthEnabled?sliderTemplate({id:'seg-length',label:'长度',min:lengthMin,max:lengthMax,step:0.01,value:cfg.length,disabled:referenceLocked}):`<p class="sub">当前骨段仅支持横截面调整。</p>`;
+  host.innerHTML=`<p class="segment-name"><span class="selected-bone">${names[parent]} → ${names[child]}</span></p>${lengthControl}<div class="segment-tools"><span>横截面</span><select id="seg-count">${Array.from({length:11},(_,i)=>i+2).map(n=>`<option value="${n}" ${n===cfg.radii.length?'selected':''}>${n} 段</option>`).join('')}</select><button class="small" id="seg-reset">重置此段</button></div><div id="radius-fields"></div>`;
+  const renderRadii=(radii)=>{
+    const fields=document.querySelector('#radius-fields');
+    fields.innerHTML=radii.map((v,i)=>sliderTemplate({
+      id:`rad-${i}`,label:`${Math.round(i/(radii.length-1)*100)}%`,
+      min:SLIDER_RADIUS_MIN,max:SLIDER_RADIUS_MAX,step:0.01,value:v,
+      attrs:`data-radius="${i}"`,
+    })).join('');
+    radii.forEach((_,i)=>wireSlider(fields,{id:`rad-${i}`,onChange:()=>apply(currentRadii())}));
+  };
+  const currentRadii=()=>[...document.querySelectorAll('[data-radius]')].map((input)=>Number(input.value));
+  // locked: keep the exact fitted length, never the slider's 2-decimal rounding
+  const currentLength=()=>referenceLocked?Number(cfg.length):(lengthEnabled?Number(document.querySelector('#seg-length').value):1);
+  const apply=(radii)=>applySegment(child,currentLength(),radii);
+  renderRadii(cfg.radii);
+  if(referenceLocked){
+    const row=document.querySelector('#seg-length-row');
+    if(row)row.onclick=warnLocked;
+  }
+  if(lengthEnabled)wireSlider(document,{id:'seg-length',onChange:()=>apply(currentRadii())});
+  document.querySelector('#seg-count').onchange=(event)=>{
+    const count=Number(event.target.value),old=currentRadii();
+    const next=Array.from({length:count},(_,i)=>old[Math.min(old.length-1,Math.round(i/(count-1)*(old.length-1)))]);
+    renderRadii(next);apply(next);
+  };
+  document.querySelector('#seg-reset').onclick=async()=>{
+    // locked: the fitted length is owned by the picture, only the cross-section
+    // is reset; unlocked: length and cross-section are both restored.
+    const keepLength=referenceLocked;
+    setStatus(keepLength?'正在重置横截面（保留对齐长度）...':'正在重置当前骨段...');
+    try{
+      const response=await fetch('/api/segment/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,child,keep_length:keepLength})});
+      if(!response.ok)throw Error(await response.text());
+      const result=await response.json();
+      if(!result.ok)throw Error('骨段重置未完成');
+      await load(selected,true,true);
+      selectedSegment=child;
+      segmentEditor();
+      setStatus(keepLength?'已重置横截面（骨骼长度保持对齐结果）':'已重置当前骨段（长度与横截面）');
+    }catch(error){setStatus('骨段重置失败：'+error.message,true);}
+  };
+  updateSelectionVisuals();
+}
+async function applySegment(child,length,radii){setStatus('正在更新骨段 Mesh...');try{const r=await fetch('/api/segment',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,child,length,radii})});if(!r.ok)throw Error(await r.text());await load(selected,true,true);selectedSegment=child;segmentEditor()}catch(e){setStatus('骨段更新失败：'+e.message,true)}}
+// ---------------------------- bone selection highlight ---------------------
+// Selecting a bone thickens it, tints its own skinned vertices and marks the
+// interior division points of the current cross-section profile.
+const MESH_BASE_COLOUR=new THREE.Color(0x9ab7df);
+const MESH_SELECT_COLOUR=new THREE.Color(0xffff00);
+const SELECTED_BONE_COLOUR=0xff6a3d;
+const DIVIDER_COLOUR=0x5ce1ff;
+let segmentOwners=null, segmentOwnersGender=null, selectionGroup=null;
+
+function paintMesh(){
+  if(!meshRoot)return;
+  meshRoot.traverse((object)=>{
+    if(!object.isMesh)return;
+    const geometry=object.geometry, count=geometry.attributes.position.count;
+    const colours=new Float32Array(count*3);
+    const selected=(selectedSegment!==null&&segmentOwners&&segmentOwners.length===count)?selectedSegment:-1;
+    for(let i=0;i<count;i++){
+      const colour=(segmentOwners&&segmentOwners[i]===selected)?MESH_SELECT_COLOUR:MESH_BASE_COLOUR;
+      colours[i*3]=colour.r;colours[i*3+1]=colour.g;colours[i*3+2]=colour.b;
+    }
+    geometry.setAttribute('color',new THREE.BufferAttribute(colours,3));
+    object.material.vertexColors=true;
+    object.material.color.set(0xffffff);
+    object.material.needsUpdate=true;
+  });
+}
+async function ensureOwners(gender){
+  if(segmentOwners&&segmentOwnersGender===gender)return;
+  segmentOwners=null;segmentOwnersGender=null;
+  try{
+    const response=await fetch('/api/weights/'+gender+'?revision='+(++revision),{cache:'no-store'});
+    if(!response.ok)throw Error(await response.text());
+    const owners=new Uint8Array(await response.arrayBuffer());
+    if(!meshRoot)return;
+    segmentOwners=owners;
+    segmentOwnersGender=gender;
+    paintMesh();
+    updateSelectionVisuals();
+  }catch(error){segmentOwners=null;}
+}
+function updateSelectionVisuals(){
+  if(selectionGroup&&skeletonRoot)skeletonRoot.remove(selectionGroup);
+  selectionGroup=null;
+  paintMesh();
+  if(selectedSegment===null||!skeletonData||!skeletonRoot)return;
+  const child=selectedSegment, parent=skeletonData.parents[child];
+  if(parent===undefined||parent<0)return;
+  const a=new THREE.Vector3(...skeletonData.joints[parent]);
+  const b=new THREE.Vector3(...skeletonData.joints[child]);
+  const direction=new THREE.Vector3().subVectors(b,a);
+  const length=direction.length();
+  if(length<1e-6)return;
+  const group=new THREE.Group();
+  const bone=new THREE.Mesh(
+    new THREE.CylinderGeometry(.005,.005,length,10,1,true),
+    new THREE.MeshBasicMaterial({color:SELECTED_BONE_COLOUR,transparent:true,opacity:.95,depthTest:false,depthWrite:false,side:THREE.DoubleSide})
+  );
+  bone.position.copy(a).add(b).multiplyScalar(.5);
+  bone.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),direction.clone().normalize());
+  bone.renderOrder=4;
+  group.add(bone);
+  const config=skeletonData.segments[String(child)];
+  const divisions=Math.max(2,(config&&Array.isArray(config.radii))?config.radii.length:3);
+  // transparent:true keeps the markers in the same (transparent) queue as the
+  // highlighted bone, so renderOrder decides and they are drawn on top of it.
+  const markerMaterial=new THREE.MeshBasicMaterial({color:DIVIDER_COLOUR,transparent:true,opacity:1,depthTest:false,depthWrite:false});
+  for(let index=1;index<divisions-1;index+=1){
+    const t=index/(divisions-1);
+    const marker=new THREE.Mesh(new THREE.SphereGeometry(.004,12,8),markerMaterial);
+    marker.position.lerpVectors(a,b,t);
+    marker.renderOrder=5;
+    group.add(marker);
+  }
+  selectionGroup=group;
+  skeletonRoot.add(group);
+}
+function clearSegmentSelection(){
+  if(selectedSegment===null)return;
+  selectedSegment=null;
+  segmentEditor();
+  setStatus('已取消骨段选择');
+}
+
+function addSkeleton(data,groundOffsetY){
+  if(skeletonRoot)scene.remove(skeletonRoot);
+  skeletonData=data;
+  skeletonRoot=new THREE.Group();
+  skeletonRoot.position.y=groundOffsetY;
+  jointPickers=[];
+  const joints=data.joints.map((p)=>new THREE.Vector3(...p));
+  const points=[],children=[];
+  for(let i=0;i<data.parents.length;i++){const parent=data.parents[i];if(parent>=0&&parent<joints.length){points.push(joints[parent],joints[i]);children.push(i);}}
+  const lineGeometry=new THREE.BufferGeometry().setFromPoints(points);
+  segmentLines=new THREE.LineSegments(lineGeometry,new THREE.LineBasicMaterial({color:0xffc64d,depthTest:false,depthWrite:false,transparent:true,opacity:1}));
+  segmentLines.userData.children=children;
+  segmentLines.renderOrder=2;
+  skeletonRoot.add(segmentLines);
+  const jointMat=new THREE.MeshBasicMaterial({color:0xfff0a6,depthTest:false,depthWrite:false});
+  for(let i=0;i<joints.length;i++){
+    const dot=new THREE.Mesh(new THREE.SphereGeometry(.006,6,4),jointMat);
+    dot.position.copy(joints[i]);
+    dot.renderOrder=3;
+    dot.userData.joint=i;
+    skeletonRoot.add(dot);
+    if(i>0&&i<=21)jointPickers.push(dot);
+  }
+  scene.add(skeletonRoot);
+  segmentEditor();
+  realignReference();
+}
+// OBJLoader expands a mesh into one vertex per triangle corner (3 x 20908 =
+// 62724 vertices), which breaks the 1:1 mapping onto the 10475 SMPL-X skinning
+// weights.  Parse the OBJ ourselves and keep it indexed so vertex index ==
+// model vertex index -- that is what makes per-vertex skin tinting possible.
+function parseObjGeometry(text){
+  const positions=[], indices=[];
+  const lines=text.split('\n');
+  for(let i=0;i<lines.length;i+=1){
+    const line=lines[i];
+    if(line.charCodeAt(0)===118&&line.charCodeAt(1)===32){            // 'v x y z'
+      const p=line.split(/\s+/);
+      positions.push(+p[1],+p[2],+p[3]);
+    }else if(line.charCodeAt(0)===102&&line.charCodeAt(1)===32){      // 'f a b c'
+      const p=line.split(/\s+/);
+      for(let k=1;k<p.length;k+=1){
+        const slash=p[k].indexOf('/');
+        indices.push(parseInt(slash<0?p[k]:p[k].slice(0,slash),10)-1);
+      }
+    }
+  }
+  const geometry=new THREE.BufferGeometry();
+  geometry.setAttribute('position',new THREE.Float32BufferAttribute(positions,3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
+async function load(gender,edited=false,force=false){
+  if(selected===gender&&!force)return;
+  const shouldFrame=selected!==gender||!meshRoot;
+  selected=gender;choices.value=gender;
+  setStatus('正在加载 '+gender+' 模型...');
+  try{
+    const suffix='?revision='+(++revision);
+    const [meshText,skeleton]=await Promise.all([
+      fetch('/api/model/'+gender+suffix,{cache:'no-store'}).then((r)=>{if(!r.ok)throw Error('网格读取失败');return r.text();}),
+      fetch('/api/skeleton/'+gender+suffix,{cache:'no-store'}).then((r)=>{if(!r.ok)throw Error('骨架数据读取失败');return r.json();})
+    ]);
+    if(meshRoot)scene.remove(meshRoot);
+    const material=new THREE.MeshStandardMaterial({color:0xffffff,vertexColors:true,roughness:.72,metalness:.03,transparent:true,opacity:.42,depthWrite:false,side:THREE.DoubleSide});
+    const obj=new THREE.Mesh(parseObjGeometry(meshText),material);
+    meshRoot=obj;
+    groundOffset=.02-new THREE.Box3().setFromObject(obj).min.y;
+    obj.position.y=groundOffset;
+    scene.add(obj);
+    paintMesh();
+    addSkeleton(skeleton,groundOffset);
+    ensureOwners(gender);
+    if(shouldFrame)frame(obj);
+    document.querySelector('#reset').disabled=false;
+    setStatus(referenceLocked?'已加载 '+gender+'（骨架已锁定，移除图片后可编辑）':'已加载 '+gender+'，可拖动黄色身体关节');
+    maybeSolveReference();
+  }catch(e){setStatus('加载失败：'+e.message,true);}
+}
+function updatePointer(event){const r=canvas.getBoundingClientRect();pointer.set((event.clientX-r.left)/r.width*2-1,-((event.clientY-r.top)/r.height)*2+1);raycaster.setFromCamera(pointer,camera)}
+let gesture=null;
+canvas.addEventListener('pointerdown',(event)=>{
+  gesture={x:event.clientX,y:event.clientY,moved:false,boneHit:false,joint:false};
+  if(!selected)return;
+  updatePointer(event);
+  const hit=raycaster.intersectObjects(jointPickers,false)[0];
+  if(hit){
+    if(referenceLocked){warnLocked();event.preventDefault();return;}
+    const joint=hit.object;
+    drag={joint:joint.userData.joint,dot:joint};
+    gesture.joint=true;
+    const worldPosition=joint.getWorldPosition(new THREE.Vector3());
+    dragPlane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(new THREE.Vector3()),worldPosition);
+    controls.enabled=false;
+    canvas.setPointerCapture(event.pointerId);
+    setStatus('拖动关节 '+drag.joint+'，松开后应用 '+(document.querySelector('#full-body-ik').checked?'全身 IK':'局部旋转'));
+    event.preventDefault();
+    return;
+  }
+  if(segmentLines){
+    raycaster.params.Line.threshold=.035;
+    const lineHit=raycaster.intersectObject(segmentLines,false)[0];
+    if(lineHit){
+      const child=segmentLines.userData.children[Math.floor(lineHit.index/2)];
+      if(child<=21){
+        selectedSegment=child;
+        gesture.boneHit=true;
+        segmentEditor();
+        setStatus('已选择骨段 '+skeletonData.names[skeletonData.parents[child]]+' → '+skeletonData.names[child]);
+        event.preventDefault();
+      }
+    }
+  }
+});
+canvas.addEventListener('pointermove',(event)=>{
+  if(gesture&&!gesture.moved&&(Math.abs(event.clientX-gesture.x)>4||Math.abs(event.clientY-gesture.y)>4))gesture.moved=true;
+  if(!drag)return;
+  updatePointer(event);
+  const p=new THREE.Vector3();
+  if(raycaster.ray.intersectPlane(dragPlane,p))drag.dot.position.copy(skeletonRoot.worldToLocal(p.clone()));
+});
+canvas.addEventListener('pointerup',async (event)=>{
+  const finished=gesture;
+  gesture=null;
+  if(drag){
+    const moved=drag;
+    drag=null;
+    controls.enabled=true;
+    canvas.releasePointerCapture(event.pointerId);
+    const fullBody=document.querySelector('#full-body-ik').checked;
+    setStatus('正在求解 '+(fullBody?'全身 IK...':'局部旋转...'));
+    try{
+      const r=await fetch('/api/pose',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,joint:moved.joint,target:moved.dot.position.toArray(),full_body:fullBody})});
+      if(!r.ok)throw Error(await r.text());
+      await r.json();
+      clearSegmentSelection();
+      await load(selected,true,true);
+    }catch(e){
+      setStatus('IK 求解失败：'+e.message,true);
+      clearSegmentSelection();
+      await load(selected,true,true);
+    }
+    return;
+  }
+  // A plain click that changed nothing deselects; an orbit / pan drag counts as
+  // a modification and leaves the selection alone.
+  if(finished&&!finished.moved&&!finished.boneHit&&!finished.joint)clearSegmentSelection();
+});
+document.querySelector('#reset').onclick=async()=>{if(!selected)return;if(referenceLocked){warnLocked();return;}const button=document.querySelector('#reset');button.disabled=true;setStatus('正在重置当前姿态...');try{const response=await fetch('/api/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected})});if(!response.ok)throw Error(await response.text());const result=await response.json();if(!result.ok)throw Error('重置未完成');selectedSegment=null;await load(selected,true,true);setStatus('已重置为默认 SMPL-X 姿态');}catch(error){setStatus('重置失败：'+error.message,true);button.disabled=false;}};
+const refInput=document.querySelector('#ref-file'), refPick=document.querySelector('#ref-pick'), refClear=document.querySelector('#ref-clear'), refHide=document.querySelector('#ref-hide');
+refPick.onclick=()=>refInput.click();
+refInput.onchange=()=>{const file=refInput.files&&refInput.files[0];refInput.value='';if(file)showReferenceFile(file);};
+refHide.onclick=()=>{
+  if(!referenceRoot)return;
+  referenceHidden=!referenceHidden;
+  referenceRoot.visible=!referenceHidden;
+  updateReferenceButtons();
+  refreshReferenceInfo();
+  setStatus(referenceHidden?'参考图已隐藏':'参考图已显示');
+};
+refClear.onclick=()=>{clearReference();setStatus('已移除参考图');};
+async function init(){const r=await fetch('/api/models');if(!r.ok)throw Error('无法读取模型信息');const data=await r.json();for(const item of data.models){const option=document.createElement('option');option.value=item.gender;option.textContent=item.label+(item.available?'':'（未安装）');option.disabled=!item.available;choices.append(option)}choices.onchange=()=>load(choices.value,true);const first=data.models.find(x=>x.available);if(first)load(first.gender,true);else setStatus('未找到可用 SMPL-X 模型文件',true)}
+init().catch(e=>setStatus(e.message,true));
+</script></body></html>
