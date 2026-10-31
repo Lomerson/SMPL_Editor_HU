@@ -12,6 +12,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from core import autofit
 from core.config import DEVICE_CHOICES, GENDERS
 from core.model import ModelCache, resolve_device
 
@@ -199,6 +200,33 @@ def handler_factory(cache: ModelCache):
                 return
             self.send_json(result)
 
+        def _handle_autofit_upload(self, gender):
+            """Run auto-fit on a raw image/zip/tar upload."""
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                size = 0
+            if size <= 0:
+                self.send_error(HTTPStatus.BAD_REQUEST, "empty auto-fit upload")
+                return
+            if size > 64 * 1024 * 1024:
+                self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "auto-fit input larger than 64 MiB")
+                return
+            payload = self.rfile.read(size)
+            filename = self.headers.get("X-Filename", "upload")
+            try:
+                result = autofit.run(cache, gender, data=payload, filename=filename)
+            except FileNotFoundError:
+                self.send_error(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
+                return
+            except ValueError as exc:
+                self.send_error(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc))
+                return
+            except Exception as exc:
+                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, f"{type(exc).__name__}: {exc}")
+                return
+            self.send_json(result)
+
         def _handle_displacement(self, gender):
             """Import a Blender shape-key displacement as a (N, 3) .npy file."""
             try:
@@ -226,6 +254,9 @@ def handler_factory(cache: ModelCache):
             path = urlparse(self.path).path
             if path == "/api/reference":
                 self._handle_reference()
+                return
+            if path.startswith("/api/autofit/upload/"):
+                self._handle_autofit_upload(path.rsplit("/", 1)[-1])
                 return
             if path.startswith("/api/displacement/") and path != "/api/displacement/reset":
                 self._handle_displacement(path.rsplit("/", 1)[-1])
@@ -270,6 +301,12 @@ def handler_factory(cache: ModelCache):
                 if path == "/api/displacement/reset":
                     cache.reset_displacement(gender)
                     self.send_json({"ok": True, "has_displacement": False})
+                    return
+                if path == "/api/autofit/path":
+                    result = autofit.run(
+                        cache, gender, path=str(data["path"])
+                    )
+                    self.send_json(result)
                     return
                 if path == "/api/segment":
                     radii = data["radii"]

@@ -12,7 +12,8 @@ from core.config import GENDERS, REFERENCE_EYE_WEIGHT, REFERENCE_IK_FULL_BODY
 
 def solve_reference_lengths(cache, gender: str, pixels_per_meter: float,
                             eye_midpoint, joints: dict,
-                            z_weight: float = 3.0) -> dict:
+                            z_weight: float = 3.0,
+                            editable_bones=None) -> dict:
     """Fit the 21 editable bone lengths so the model's joints land on the picture.
 
     The picture already sits on the model's eye midpoint, so every joint is
@@ -33,9 +34,16 @@ def solve_reference_lengths(cache, gender: str, pixels_per_meter: float,
     model, output = cache._output(gender)
     base = output.joints[0, :len(model.parents)].detach().cpu().numpy().astype(np.float64)
     parents = model.parents.cpu().numpy().astype(np.int64)
-    bones = [k for k in range(1, 22) if parents[k] >= 0]
+    all_bones = [k for k in range(1, 22) if parents[k] >= 0]
+    bones = all_bones
+    if editable_bones is not None:
+        allowed = {int(k) for k in editable_bones}
+        bones = [k for k in all_bones if k in allowed]
+        if not bones:
+            raise ValueError("editable_bones selects no body bone")
     slot = {k: i for i, k in enumerate(bones)}
     vectors = {k: base[k] - base[int(parents[k])] for k in bones}
+    fixed = {k: base[k] - base[int(parents[k])] for k in all_bones if k not in slot}
 
     # J_eye = J_15 + eye_offset; the 15->23/24 bones are not editable.
     eye_offset = (base[23] + base[24]) / 2.0 - base[15]
@@ -50,10 +58,18 @@ def solve_reference_lengths(cache, gender: str, pixels_per_meter: float,
     def row_for(joint: int) -> np.ndarray:
         row = np.zeros((3, len(bones)))
         for k in path(joint):
-            if k in slot:
-                row[0, slot[k]] += vectors[k][0]
-                row[1, slot[k]] += vectors[k][1]
-                row[2, slot[k]] += vectors[k][2]
+            vector = vectors.get(k)
+            if vector is None:
+                vector = fixed.get(k)
+                if vector is None:
+                    continue
+                row[0, :] += vector[0]
+                row[1, :] += vector[1]
+                row[2, :] += vector[2]
+                continue
+            row[0, slot[k]] += vector[0]
+            row[1, slot[k]] += vector[1]
+            row[2, slot[k]] += vector[2]
         return row
 
     eye_row = row_for(15)

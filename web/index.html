@@ -39,7 +39,9 @@
   .export-buttons button { flex:1 1 0; min-width:0; padding:0 4px; font-size:11px; text-align:center; }
   #skin-opacity-row { grid-template-columns:44px minmax(0,1fr) 40px; }
   #skin-opacity-host { margin-top:8px; }
-  #disp-file { display:none; }
+  #disp-file, #fit-file { display:none; }
+  #fit-path { flex:1; min-width:0; min-height:34px; border:1px solid #414957; border-radius:6px; background:#252b35; color:#eff2f7; padding:0 8px; font-size:12px; }
+  #fit-run, #fit-path-run { min-height:34px; font-size:12px; }
   .step-btn:disabled { color:#697383; cursor:not-allowed; opacity:.5; }
   .skeleton-locked #seg-length-row { cursor:not-allowed; } .ref-row { display:flex; gap:8px; align-items:stretch; } #ref-pick { flex:1 1 auto; min-width:0; text-align:center; } #ref-hide, #ref-clear { flex:0 0 62px; min-width:62px; text-align:center; } #ref-file { display:none; } .ref-info { margin:8px 0 0; } @media(max-width:700px) { #app{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)} aside{padding:14px; border-right:0; border-bottom:1px solid #303642; gap:12px}.gender{grid-template-columns:repeat(3,1fr)} button{font-size:12px;text-align:center} #status{margin-top:0} }
 </style>
@@ -50,6 +52,7 @@
   <details class="panel" open><summary class="section-title">调整人体姿态</summary><div class="pose-controls"><label class="toggle"><input id="full-body-ik" type="checkbox"> <span>全身 IK</span></label><button id="reset" disabled>重置当前姿态</button></div><p class="sub">关闭时移动所选点及其子节点，父节点保持固定；开启后允许整条父链共同求解。</p></details>
   <details class="panel" open><summary class="section-title">骨段编辑</summary><div id="segment-editor" class="segment-empty">点击一条黄色骨骼连线以编辑该骨段。</div></details>
   <details class="panel" open><summary class="section-title">头部编辑</summary><div id="head-editor" class="segment-empty">正在读取头部参数...</div></details>
+  <details class="panel" open><summary class="section-title">Auto-fit v0</summary><div class="ref-row"><button id="fit-pick">选择图片/压缩包</button><button id="fit-run" class="small" disabled>开始拟合</button></div><input id="fit-file" type="file" accept="image/*,.zip,.tar,.tgz,.gz"><p class="sub" id="fit-info">支持：单张正+侧组合图 / 目录路径 / zip / tar.gz / tgz / 单张正视图。文件名不用于判断正/侧。</p><div class="ref-row"><input id="fit-path" value="/home/lomerson/MyProjects/ui" aria-label="服务器图片/目录/压缩包路径"><button id="fit-path-run" class="small">按路径拟合</button></div></details>
   <details class="panel" open><summary class="section-title">参考图</summary><div class="ref-row"><button id="ref-pick">选择图片</button><button id="ref-hide" class="small" disabled>隐藏</button><button id="ref-clear" class="small" disabled>移除</button></div><input id="ref-file" type="file" accept="image/png,image/jpeg,image/jpg,image/webp,image/bmp,image/gif,image/tiff,image/*"><p class="sub ref-info" id="ref-info">未选择图片。上传后自动用 AnimePoseDetector 对齐双眼。</p></details>
   <details class="panel"><summary class="section-title">导出</summary><div class="segment-tools export-buttons"><button id="export-glb" class="small" title="下载带 55 关节蒙皮的 T-pose GLB">GLB</button><button id="export-params" class="small" title="下载 identity 参数 JSON">参数</button><button id="export-fourview" class="small" title="下载四视图 PNG + views.json">四视图</button></div><div class="segment-tools export-buttons"><button id="disp-pick" class="small" title="导入 Blender shape key 导出的 (N,3) .npy">导入位移</button><button id="disp-clear" class="small" disabled title="移除已导入的位移">清除位移</button></div><input id="disp-file" type="file" accept=".npy,application/octet-stream"><p class="sub">GLB 带 55 关节蒙皮（Blender 会得到 Armature + Vertex Groups）；四视图为剪影 + 眼睛位置；导出始终是 T-pose identity，不包含当前摆姿。位移会应用到 GLB/四视图。</p></details>
   <div id="status">正在读取模型信息...</div>
@@ -589,6 +592,42 @@ function updateDisplacementButtons(present){
   const clear=document.querySelector('#disp-clear');
   if(clear)clear.disabled=!present;
 }
+let autofitFile=null;
+function showAutofitInfo(result){
+  const host=document.querySelector('#fit-info');
+  if(!host)return;
+  const front=result.front||{};
+  const bits=[];
+  bits.push(`输入：${result.source||'?'}（${result.num_figures||0} 个视图）`);
+  if(front.bbox)bits.push(`正视 ${front.bbox[2]}×${front.bbox[3]} px · ${Number(front.ppm).toFixed(0)} px/m · 残差 ${Number(front.rms_px).toFixed(1)} px`);
+  if(front.global_scale)bits.push(`高度缩放 ${Number(front.global_scale).toFixed(3)}`);
+  if(result.side){const s=result.side;bits.push(`侧视深度比 ${Number(s.depth_ratio).toFixed(2)} · 躯干 girth ${Object.values(result.applied_girth||{}).map(v=>Number(v).toFixed(2)).join('/')||'1.00'}`);}
+  if(result.warnings&&result.warnings.length)bits.push(`注意：${result.warnings.join('；')}`);
+  host.textContent=bits.join(' · ');
+}
+async function runAutofit(mode){
+  if(!selected)return;
+  const pathInput=document.querySelector('#fit-path');
+  setStatus(mode==='path'?'Auto-fit v0 正在读取路径...':'Auto-fit v0 正在分析上传...');
+  try{
+    let response;
+    if(mode==='path'){
+      const path=(pathInput&&pathInput.value||'').trim();
+      if(!path)throw Error('请输入服务器图片/目录/压缩包路径');
+      response=await fetch('/api/autofit/path',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,path})});
+    }else{
+      if(!autofitFile)throw Error('请先选择图片/压缩包');
+      response=await fetch('/api/autofit/upload/'+selected,{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Filename':autofitFile.name},body:autofitFile});
+    }
+    if(!response.ok)throw Error((await response.text()).slice(0,220));
+    const result=await response.json();
+    if(referenceRoot)clearReference();
+    selectedSegment=null;
+    await load(selected,true,true);
+    showAutofitInfo(result);
+    setStatus('Auto-fit v0 完成：已应用骨长/躯干 girth，可继续粗调');
+  }catch(error){setStatus('Auto-fit v0 失败：'+error.message,true);}
+}
 async function importDisplacement(file){
   if(!selected||!file)return;
   setStatus('正在导入 Blender 位移 '+file.name+' ...');
@@ -721,6 +760,11 @@ const dispPick=document.querySelector('#disp-pick'), dispClear=document.querySel
 dispPick.onclick=()=>dispFile.click();
 dispFile.onchange=()=>{const file=dispFile.files&&dispFile.files[0];dispFile.value='';if(file)importDisplacement(file);};
 dispClear.onclick=async()=>{if(!selected)return;setStatus('正在清除位移...');try{const response=await fetch('/api/displacement/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected})});if(!response.ok)throw Error(await response.text());await load(selected,true,true);updateDisplacementButtons(false);setStatus('已清除位移');}catch(error){setStatus('清除位移失败：'+error.message,true);}};
+const fitPick=document.querySelector('#fit-pick'), fitFileInput=document.querySelector('#fit-file'), fitRun=document.querySelector('#fit-run'), fitPathRun=document.querySelector('#fit-path-run');
+fitPick.onclick=()=>fitFileInput.click();
+fitFileInput.onchange=()=>{const file=fitFileInput.files&&fitFileInput.files[0];fitFileInput.value='';if(!file)return;autofitFile=file;fitRun.disabled=false;document.querySelector('#fit-info').textContent='已选择 '+file.name+'，点击「开始拟合」';};
+fitRun.onclick=()=>runAutofit('file');
+fitPathRun.onclick=()=>runAutofit('path');
 async function init(){renderSkinOpacity();const r=await fetch('/api/models');if(!r.ok)throw Error('无法读取模型信息');const data=await r.json();for(const item of data.models){const option=document.createElement('option');option.value=item.gender;option.textContent=item.label+(item.available?'':'（未安装）');option.disabled=!item.available;choices.append(option)}choices.onchange=()=>load(choices.value,true);const first=data.models.find(x=>x.available);if(first)load(first.gender,true);else setStatus('未找到可用 SMPL-X 模型文件',true)}
 init().catch(e=>setStatus(e.message,true));
 </script></body></html>

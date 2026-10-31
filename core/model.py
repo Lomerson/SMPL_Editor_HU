@@ -452,9 +452,11 @@ class ModelCache:
 
     def solve_reference_lengths(self, gender: str, pixels_per_meter: float,
                                 eye_midpoint, joints: dict,
-                                z_weight: float = 3.0) -> dict:
+                                z_weight: float = 3.0,
+                                editable_bones=None) -> dict:
         return fitting_init.solve_reference_lengths(
-            self, gender, pixels_per_meter, eye_midpoint, joints, z_weight=z_weight
+            self, gender, pixels_per_meter, eye_midpoint, joints,
+            z_weight=z_weight, editable_bones=editable_bones,
         )
 
     def _reference_residual(self, gender, pixels_per_meter, eye_midpoint, joints):
