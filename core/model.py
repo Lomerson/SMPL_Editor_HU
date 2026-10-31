@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from core import detector, export, geometry, glb
+from core import detector, export, fourview, geometry, glb
 from core.config import DEVICE_CHOICES, GENDERS
 from core.deform import LENGTH_MAX, LENGTH_MIN
 from core.fitting import init as fitting_init
@@ -402,6 +402,9 @@ class ModelCache:
 
     def params(self, gender: str) -> Path:
         return glb.export_params(self, gender)
+
+    def fourview(self, gender: str) -> Path:
+        return fourview.export_fourview(self, gender)
 
     def skeleton(self, gender: str) -> dict:
         return geometry.skeleton(self, gender)

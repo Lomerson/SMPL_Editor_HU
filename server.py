@@ -104,6 +104,28 @@ def handler_factory(cache: ModelCache):
                 self.end_headers()
                 self.wfile.write(data)
                 return
+            if path.startswith("/api/export/fourview/"):
+                gender = path.rsplit("/", 1)[-1]
+                try:
+                    target = cache.fourview(gender)
+                except FileNotFoundError:
+                    self.send_error(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
+                    return
+                except Exception as exc:
+                    self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                    return
+                data = target.read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/zip")
+                self.send_header(
+                    "Content-Disposition",
+                    f'attachment; filename="{target.name}"',
+                )
+                self.send_header("Cache-Control", "no-store, max-age=0")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if path.startswith("/api/skeleton/"):
                 gender = path.rsplit("/", 1)[-1]
                 try:

@@ -48,7 +48,7 @@
   <details class="panel" open><summary class="section-title">骨段编辑</summary><div id="segment-editor" class="segment-empty">点击一条黄色骨骼连线以编辑该骨段。</div></details>
   <details class="panel" open><summary class="section-title">头部编辑</summary><div id="head-editor" class="segment-empty">正在读取头部参数...</div></details>
   <details class="panel" open><summary class="section-title">参考图</summary><div class="ref-row"><button id="ref-pick">选择图片</button><button id="ref-hide" class="small" disabled>隐藏</button><button id="ref-clear" class="small" disabled>移除</button></div><input id="ref-file" type="file" accept="image/png,image/jpeg,image/jpg,image/webp,image/bmp,image/gif,image/tiff,image/*"><p class="sub ref-info" id="ref-info">未选择图片。上传后自动用 AnimePoseDetector 对齐双眼。</p></details>
-  <details class="panel"><summary class="section-title">导出</summary><div class="segment-tools export-buttons"><button id="export-glb" class="small" title="下载带 55 关节蒙皮的 T-pose GLB">GLB</button><button id="export-params" class="small" title="下载 identity 参数 JSON">参数</button></div><p class="sub">GLB 带 55 关节蒙皮（Blender 会得到 Armature + Vertex Groups）；导出始终是 T-pose identity，不包含当前摆姿。</p></details>
+  <details class="panel"><summary class="section-title">导出</summary><div class="segment-tools export-buttons"><button id="export-glb" class="small" title="下载带 55 关节蒙皮的 T-pose GLB">GLB</button><button id="export-params" class="small" title="下载 identity 参数 JSON">参数</button><button id="export-fourview" class="small" title="下载四视图 PNG + views.json">四视图</button></div><p class="sub">GLB 带 55 关节蒙皮（Blender 会得到 Armature + Vertex Groups）；四视图为剪影 + 眼睛位置；导出始终是 T-pose identity，不包含当前摆姿。</p></details>
   <div id="status">正在读取模型信息...</div>
 </aside><main><canvas id="viewer"></canvas><div class="hud">点击黄色身体关节后拖动<br>空白处拖动旋转 · 滚轮缩放</div><div id="toasts"></div></main></div>
 <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"}}</script>
@@ -665,9 +665,10 @@ refHide.onclick=()=>{
   setStatus(referenceHidden?'参考图已隐藏':'参考图已显示');
 };
 refClear.onclick=()=>{clearReference();setStatus('已移除参考图');};
-const exportGlb=document.querySelector('#export-glb'), exportParams=document.querySelector('#export-params');
+const exportGlb=document.querySelector('#export-glb'), exportParams=document.querySelector('#export-params'), exportFourview=document.querySelector('#export-fourview');
 exportGlb.onclick=()=>{if(!selected)return;setStatus('正在导出 T-pose GLB（含 55 关节蒙皮）...');window.location.href='/api/export/glb/'+selected;};
 exportParams.onclick=()=>{if(!selected)return;setStatus('正在导出 identity 参数 JSON...');window.location.href='/api/export/params/'+selected;};
+exportFourview.onclick=()=>{if(!selected)return;setStatus('正在导出四视图（正/背/左/右）...');window.location.href='/api/export/fourview/'+selected;};
 async function init(){const r=await fetch('/api/models');if(!r.ok)throw Error('无法读取模型信息');const data=await r.json();for(const item of data.models){const option=document.createElement('option');option.value=item.gender;option.textContent=item.label+(item.available?'':'（未安装）');option.disabled=!item.available;choices.append(option)}choices.onchange=()=>load(choices.value,true);const first=data.models.find(x=>x.available);if(first)load(first.gender,true);else setStatus('未找到可用 SMPL-X 模型文件',true)}
 init().catch(e=>setStatus(e.message,true));
 </script></body></html>
