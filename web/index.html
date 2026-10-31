@@ -37,13 +37,15 @@
   .step-btn { width:20px; height:20px; min-height:0; padding:0; border:1px solid #414957; border-radius:4px; background:#252b35; color:#eff2f7; font-size:13px; line-height:1; display:flex; align-items:center; justify-content:center; text-align:center; cursor:pointer; }
   .step-btn:hover:not(:disabled) { border-color:#7da6ef; background:#293544; }
   .export-buttons button { flex:1 1 0; min-width:0; padding:0 4px; font-size:11px; text-align:center; }
+  #skin-opacity-row { grid-template-columns:44px minmax(0,1fr) 40px; }
+  #skin-opacity-host { margin-top:8px; }
   .step-btn:disabled { color:#697383; cursor:not-allowed; opacity:.5; }
   .skeleton-locked #seg-length-row { cursor:not-allowed; } .ref-row { display:flex; gap:8px; align-items:stretch; } #ref-pick { flex:1 1 auto; min-width:0; text-align:center; } #ref-hide, #ref-clear { flex:0 0 62px; min-width:62px; text-align:center; } #ref-file { display:none; } .ref-info { margin:8px 0 0; } @media(max-width:700px) { #app{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)} aside{padding:14px; border-right:0; border-bottom:1px solid #303642; gap:12px}.gender{grid-template-columns:repeat(3,1fr)} button{font-size:12px;text-align:center} #status{margin-top:0} }
 </style>
 </head>
 <body><div id="app"><aside>
   <div><h1>SMPL-X T-pose</h1><p class="sub">选择性别模型。鼠标左键旋转，滚轮缩放，右键平移。</p></div>
-  <details class="panel" open><summary class="section-title">人体模型</summary><select id="gender" aria-label="人体模型"></select></details>
+  <details class="panel" open><summary class="section-title">人体模型</summary><select id="gender" aria-label="人体模型"></select><div id="skin-opacity-host"></div><p class="sub">蒙皮透明度：透明（只看骨架）/ 半透明 / 不透明</p></details>
   <details class="panel" open><summary class="section-title">调整人体姿态</summary><div class="pose-controls"><label class="toggle"><input id="full-body-ik" type="checkbox"> <span>全身 IK</span></label><button id="reset" disabled>重置当前姿态</button></div><p class="sub">关闭时移动所选点及其子节点，父节点保持固定；开启后允许整条父链共同求解。</p></details>
   <details class="panel" open><summary class="section-title">骨段编辑</summary><div id="segment-editor" class="segment-empty">点击一条黄色骨骼连线以编辑该骨段。</div></details>
   <details class="panel" open><summary class="section-title">头部编辑</summary><div id="head-editor" class="segment-empty">正在读取头部参数...</div></details>
@@ -62,6 +64,8 @@ const controls=new OrbitControls(camera,renderer.domElement); controls.target.se
 scene.add(new THREE.HemisphereLight(0xddeaff,0x20242c,2.0)); const key=new THREE.DirectionalLight(0xffffff,2.1); key.position.set(3,5,4); scene.add(key);
 const grid=new THREE.GridHelper(8,16,0x4a596f,0x27303b); scene.add(grid); const axes=new THREE.AxesHelper(.45); axes.position.set(-2.5,.01,2.5); scene.add(axes);
 let meshRoot=null, skeletonRoot=null, selected=null, jointPickers=[], segmentLines=null, skeletonData=null, drag=null, selectedSegment=null, revision=0;
+let skinOpacityLevel=1;
+const MESH_OPACITY=0.42;
 const raycaster=new THREE.Raycaster(), pointer=new THREE.Vector2(), dragPlane=new THREE.Plane();
 function resize(){const r=canvas.getBoundingClientRect();renderer.setSize(r.width,r.height,false);camera.aspect=r.width/r.height;camera.updateProjectionMatrix()} addEventListener('resize',resize); resize();
 function render(){controls.update();renderer.render(scene,camera);requestAnimationFrame(render)} render();
@@ -556,6 +560,30 @@ function parseObjGeometry(text){
   return geometry;
 }
 
+function applySkinOpacity(){
+  if(meshRoot){
+    meshRoot.visible=skinOpacityLevel>0;
+    meshRoot.traverse((object)=>{
+      if(!object.isMesh)return;
+      const material=object.material;
+      material.transparent=skinOpacityLevel<2;
+      material.opacity=skinOpacityLevel===0?0:(skinOpacityLevel===1?MESH_OPACITY:1);
+      material.depthWrite=skinOpacityLevel===2;
+      material.needsUpdate=true;
+    });
+  }
+  if(skeletonRoot)skeletonRoot.visible=skinOpacityLevel<2;
+}
+function renderSkinOpacity(){
+  const host=document.querySelector('#skin-opacity-host');
+  if(!host)return;
+  host.innerHTML=sliderTemplate({id:'skin-opacity',label:'蒙皮',min:0,max:2,step:1,value:skinOpacityLevel,decimals:0,enableButtons:false});
+  wireSlider(host,{id:'skin-opacity',decimals:0,onChange:()=>{
+    const input=document.querySelector('#skin-opacity');
+    skinOpacityLevel=Number(input.value);
+    applySkinOpacity();
+  }});
+}
 async function load(gender,edited=false,force=false){
   if(selected===gender&&!force)return;
   const shouldFrame=selected!==gender||!meshRoot;
@@ -568,7 +596,7 @@ async function load(gender,edited=false,force=false){
       fetch('/api/skeleton/'+gender+suffix,{cache:'no-store'}).then((r)=>{if(!r.ok)throw Error('骨架数据读取失败');return r.json();})
     ]);
     if(meshRoot)scene.remove(meshRoot);
-    const material=new THREE.MeshStandardMaterial({color:0xffffff,vertexColors:true,roughness:.72,metalness:.03,transparent:true,opacity:.42,depthWrite:false,side:THREE.DoubleSide});
+    const material=new THREE.MeshStandardMaterial({color:0xffffff,vertexColors:true,roughness:.72,metalness:.03,transparent:true,opacity:MESH_OPACITY,depthWrite:false,side:THREE.DoubleSide});
     const obj=new THREE.Mesh(parseObjGeometry(meshText),material);
     meshRoot=obj;
     groundOffset=.02-new THREE.Box3().setFromObject(obj).min.y;
@@ -578,6 +606,7 @@ async function load(gender,edited=false,force=false){
     addSkeleton(skeleton,groundOffset);
     ensureOwners(gender);
     if(shouldFrame)frame(obj);
+    applySkinOpacity();
     document.querySelector('#reset').disabled=false;
     setStatus(referenceLocked?'已加载 '+gender+'（骨架已锁定，移除图片后可编辑）':'已加载 '+gender+'，可拖动黄色身体关节');
     maybeSolveReference();
@@ -588,6 +617,7 @@ let gesture=null;
 canvas.addEventListener('pointerdown',(event)=>{
   gesture={x:event.clientX,y:event.clientY,moved:false,boneHit:false,joint:false};
   if(!selected)return;
+  if(skinOpacityLevel===2)return;   // skeleton is hidden; let OrbitControls handle it
   updatePointer(event);
   const hit=raycaster.intersectObjects(jointPickers,false)[0];
   if(hit){
@@ -669,6 +699,6 @@ const exportGlb=document.querySelector('#export-glb'), exportParams=document.que
 exportGlb.onclick=()=>{if(!selected)return;setStatus('正在导出 T-pose GLB（含 55 关节蒙皮）...');window.location.href='/api/export/glb/'+selected;};
 exportParams.onclick=()=>{if(!selected)return;setStatus('正在导出 identity 参数 JSON...');window.location.href='/api/export/params/'+selected;};
 exportFourview.onclick=()=>{if(!selected)return;setStatus('正在导出四视图（正/背/左/右）...');window.location.href='/api/export/fourview/'+selected;};
-async function init(){const r=await fetch('/api/models');if(!r.ok)throw Error('无法读取模型信息');const data=await r.json();for(const item of data.models){const option=document.createElement('option');option.value=item.gender;option.textContent=item.label+(item.available?'':'（未安装）');option.disabled=!item.available;choices.append(option)}choices.onchange=()=>load(choices.value,true);const first=data.models.find(x=>x.available);if(first)load(first.gender,true);else setStatus('未找到可用 SMPL-X 模型文件',true)}
+async function init(){renderSkinOpacity();const r=await fetch('/api/models');if(!r.ok)throw Error('无法读取模型信息');const data=await r.json();for(const item of data.models){const option=document.createElement('option');option.value=item.gender;option.textContent=item.label+(item.available?'':'（未安装）');option.disabled=!item.available;choices.append(option)}choices.onchange=()=>load(choices.value,true);const first=data.models.find(x=>x.available);if(first)load(first.gender,true);else setStatus('未找到可用 SMPL-X 模型文件',true)}
 init().catch(e=>setStatus(e.message,true));
 </script></body></html>
