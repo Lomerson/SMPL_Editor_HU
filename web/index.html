@@ -302,9 +302,12 @@ function segmentEditor(){
   const cfg=skeletonData.segments[String(child)]||{length:1,radii:[1,1,1]};
   const names=skeletonData.names;
   host.className='';
-  const lengthEnabled=(child===4||child===5||child===7||child===8||child===18||child===19||child===20||child===21);
+  // All body segments except the head (15) may change rest length.  The head
+  // segment is reserved for the dedicated head editor: a generic length edit
+  // would translate the skull instead of scaling it.
+  const lengthEnabled=(child>=1&&child<=21&&child!==15);
   const lengthMin=Math.min(0.50,cfg.length), lengthMax=Math.max(1.80,cfg.length);
-  const lengthControl=lengthEnabled?sliderTemplate({id:'seg-length',label:'长度',min:lengthMin,max:lengthMax,step:0.01,value:cfg.length,disabled:referenceLocked}):`<p class="sub">当前骨段仅支持横截面调整。</p>`;
+  const lengthControl=lengthEnabled?sliderTemplate({id:'seg-length',label:'长度',min:lengthMin,max:lengthMax,step:0.01,value:cfg.length,disabled:referenceLocked}):`<p class="sub">${child===15?'头部长度将在头部编辑器中提供；当前可调横截面。':'当前骨段仅支持横截面调整。'}</p>`;
   host.innerHTML=`<p class="segment-name"><span class="selected-bone">${names[parent]} → ${names[child]}</span></p>${lengthControl}<div class="segment-tools"><span>横截面</span><select id="seg-count">${Array.from({length:11},(_,i)=>i+2).map(n=>`<option value="${n}" ${n===cfg.radii.length?'selected':''}>${n} 段</option>`).join('')}</select><button class="small" id="seg-reset">重置此段</button></div><div id="radius-fields"></div>`;
   const renderRadii=(radii)=>{
     const fields=document.querySelector('#radius-fields');

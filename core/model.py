@@ -8,6 +8,7 @@ import numpy as np
 
 from core import detector, export, geometry
 from core.config import DEVICE_CHOICES, GENDERS
+from core.deform import LENGTH_MAX, LENGTH_MIN
 from core.fitting import init as fitting_init
 
 def resolve_device(requested: str = "auto") -> tuple[str, str]:
@@ -65,6 +66,8 @@ class ModelCache:
         self.models = {}
         self.outputs = {}
         self.segment_configs = {}
+        self.segment_sequences = {}
+        self._sequence = 0
         self.geometry_cache = {}
 
     def source(self, gender: str) -> Path:
@@ -150,26 +153,93 @@ class ModelCache:
     def _segments(self, gender: str):
         return self.segment_configs.setdefault(gender, {})
 
+    def _sync_joint_girth(self, gender: str, joint: int, value: float, parents):
+        """Give every bone incident to ``joint`` the same endpoint girth.
+
+        Girth lives on the joint, not on a half-open bone: the elbow value is
+        shared by the upper arm's 100% and the forearm's 0% control point.
+        Keeping the stored arrays in sync means the UI shows the same number
+        from either side.
+        """
+        config = self._segments(gender)
+        entry = config.get(str(joint))
+        if entry is not None:
+            radii = entry.get("radii")
+            if isinstance(radii, list) and len(radii) >= 2:
+                radii[-1] = float(value)
+        for child in range(1, 22):
+            if int(parents[child]) != joint:
+                continue
+            entry = config.get(str(child))
+            if entry is None:
+                continue
+            radii = entry.get("radii")
+            if isinstance(radii, list) and len(radii) >= 2:
+                radii[0] = float(value)
+
+    def _sync_all_girths(self, gender: str):
+        """Re-share every joint's girth after a bulk write (reference fit)."""
+        config = self._segments(gender)
+        parents = self._model(gender).parents.cpu().numpy()
+        sequences = self.segment_sequences.get(gender, {})
+        for joint in range(0, 22):
+            candidates = []
+            entry = config.get(str(joint))
+            if entry is not None:
+                radii = entry.get("radii")
+                if isinstance(radii, list) and len(radii) >= 2:
+                    candidates.append((int(sequences.get(str(joint), 0)), 1, radii[-1]))
+            for child in range(1, 22):
+                if int(parents[child]) != joint:
+                    continue
+                entry = config.get(str(child))
+                if entry is None:
+                    continue
+                radii = entry.get("radii")
+                if isinstance(radii, list) and len(radii) >= 2:
+                    candidates.append((int(sequences.get(str(child), 0)), 2, radii[0]))
+            if not candidates:
+                continue
+            candidates.sort(key=lambda item: (item[0], item[1]))
+            value = float(candidates[-1][2])
+            self._sync_joint_girth(gender, joint, value, parents)
+
     def update_segment(self, gender: str, child: int, length: float, radii: list[float]):
         if gender not in GENDERS or not self.available(gender):
             raise FileNotFoundError(gender)
         if child < 1 or child > 21:
             raise ValueError("Invalid body segment")
+        try:
+            radii = [float(value) for value in radii]
+            length = float(length)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("length and radii must be numbers") from exc
         if not 2 <= len(radii) <= 12 or any(not 0.3 <= value <= 1.5 for value in radii):
             raise ValueError("Radius controls must contain 2-12 values between 0.3 and 1.5")
+        if not np.isfinite(length) or not LENGTH_MIN <= length <= LENGTH_MAX:
+            raise ValueError(
+                f"length must be between {LENGTH_MIN:.2f} and {LENGTH_MAX:.2f}"
+            )
         with self.lock:
-            if child in (4, 5, 7, 8, 18, 19, 20, 21):
-                stored_length = float(length)
-            else:
-                # Non-limb lengths are owned by the reference alignment: a girth
-                # edit must neither reject the request nor silently reset them.
+            if child == 15:
+                # The head segment (neck->head) is owned by the upcoming head
+                # deformer.  A girth edit must not reset a length written by
+                # the reference fit, so keep the stored value.
                 stored_length = float(
                     self._segments(gender).get(str(child), {}).get("length", 1.0)
                 )
+            else:
+                stored_length = length
+            radii = [float(value) for value in radii]
             self._segments(gender)[str(child)] = {
                 "length": stored_length,
-                "radii": [float(value) for value in radii],
+                "radii": radii,
             }
+            self._sequence += 1
+            self.segment_sequences.setdefault(gender, {})[str(child)] = self._sequence
+            parents = self._model(gender).parents.cpu().numpy()
+            self._sync_joint_girth(gender, int(parents[child]), radii[0], parents)
+            self._sync_joint_girth(gender, child, radii[-1], parents)
             self._invalidate_geometry(gender)
 
     def reset_segment(self, gender: str, child: int, keep_length: bool = False):
@@ -189,8 +259,15 @@ class ModelCache:
             entry = self._segments(gender).get(str(child))
             if keep_length and entry is not None:
                 entry["radii"] = [1.0, 1.0, 1.0]
+                # A reset cross-section is a real edit of the shared joints,
+                # unlike deleting the entry (where an adjacent bone may still
+                # own the joint value).
+                parents = self._model(gender).parents.cpu().numpy()
+                self._sync_joint_girth(gender, int(parents[child]), 1.0, parents)
+                self._sync_joint_girth(gender, child, 1.0, parents)
             else:
                 self._segments(gender).pop(str(child), None)
+                self.segment_sequences.get(gender, {}).pop(str(child), None)
             self._invalidate_geometry(gender)
 
     def reset(self, gender: str):
@@ -204,6 +281,7 @@ class ModelCache:
             )
             self.global_orients.pop(gender, None)
             self.segment_configs.pop(gender, None)
+            self.segment_sequences.pop(gender, None)
             self.outputs.pop(gender, None)
             self._invalidate_geometry(gender)
 
@@ -286,6 +364,9 @@ class ModelCache:
     # ------------------------------------------------------------------
     def _geometry(self, gender: str):
         return geometry.geometry(self, gender)
+
+    def rest_geometry(self, gender: str):
+        return geometry.rest_geometry(self, gender)
 
     def _invalidate_geometry(self, gender: str):
         geometry.invalidate(self, gender)

@@ -92,6 +92,9 @@ def solve_reference_lengths(cache, gender: str, pixels_per_meter: float,
             entry["length"] = float(factor)
             entry.setdefault("radii", [1.0, 1.0, 1.0])
             config[str(k)] = entry
+        # A fit writes all 21 lengths in one pass; keep the shared joint girth
+        # values consistent with any earlier manual edit.
+        cache._sync_all_girths(gender)
         cache._invalidate_geometry(gender)
         _model, vertices, new_joints, _parents = cache._geometry(gender)
 
