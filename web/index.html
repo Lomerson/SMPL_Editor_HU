@@ -36,6 +36,7 @@
   .slider-field { display:grid; grid-template-columns:44px 20px minmax(0,1fr) 20px 40px; gap:6px; align-items:center; margin:8px 0; font-size:12px; color:#b9c3d0; }
   .step-btn { width:20px; height:20px; min-height:0; padding:0; border:1px solid #414957; border-radius:4px; background:#252b35; color:#eff2f7; font-size:13px; line-height:1; display:flex; align-items:center; justify-content:center; text-align:center; cursor:pointer; }
   .step-btn:hover:not(:disabled) { border-color:#7da6ef; background:#293544; }
+  .export-buttons button { flex:1 1 0; min-width:0; padding:0 4px; font-size:11px; text-align:center; }
   .step-btn:disabled { color:#697383; cursor:not-allowed; opacity:.5; }
   .skeleton-locked #seg-length-row { cursor:not-allowed; } .ref-row { display:flex; gap:8px; align-items:stretch; } #ref-pick { flex:1 1 auto; min-width:0; text-align:center; } #ref-hide, #ref-clear { flex:0 0 62px; min-width:62px; text-align:center; } #ref-file { display:none; } .ref-info { margin:8px 0 0; } @media(max-width:700px) { #app{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)} aside{padding:14px; border-right:0; border-bottom:1px solid #303642; gap:12px}.gender{grid-template-columns:repeat(3,1fr)} button{font-size:12px;text-align:center} #status{margin-top:0} }
 </style>
@@ -45,7 +46,9 @@
   <details class="panel" open><summary class="section-title">人体模型</summary><select id="gender" aria-label="人体模型"></select></details>
   <details class="panel" open><summary class="section-title">调整人体姿态</summary><div class="pose-controls"><label class="toggle"><input id="full-body-ik" type="checkbox"> <span>全身 IK</span></label><button id="reset" disabled>重置当前姿态</button></div><p class="sub">关闭时移动所选点及其子节点，父节点保持固定；开启后允许整条父链共同求解。</p></details>
   <details class="panel" open><summary class="section-title">骨段编辑</summary><div id="segment-editor" class="segment-empty">点击一条黄色骨骼连线以编辑该骨段。</div></details>
+  <details class="panel" open><summary class="section-title">头部编辑</summary><div id="head-editor" class="segment-empty">正在读取头部参数...</div></details>
   <details class="panel" open><summary class="section-title">参考图</summary><div class="ref-row"><button id="ref-pick">选择图片</button><button id="ref-hide" class="small" disabled>隐藏</button><button id="ref-clear" class="small" disabled>移除</button></div><input id="ref-file" type="file" accept="image/png,image/jpeg,image/jpg,image/webp,image/bmp,image/gif,image/tiff,image/*"><p class="sub ref-info" id="ref-info">未选择图片。上传后自动用 AnimePoseDetector 对齐双眼。</p></details>
+  <details class="panel"><summary class="section-title">导出</summary><div class="segment-tools export-buttons"><button id="export-glb" class="small" title="下载带 55 关节蒙皮的 T-pose GLB">GLB</button><button id="export-params" class="small" title="下载 identity 参数 JSON">参数</button></div><p class="sub">GLB 带 55 关节蒙皮（Blender 会得到 Armature + Vertex Groups）；导出始终是 T-pose identity，不包含当前摆姿。</p></details>
   <div id="status">正在读取模型信息...</div>
 </aside><main><canvas id="viewer"></canvas><div class="hud">点击黄色身体关节后拖动<br>空白处拖动旋转 · 滚轮缩放</div><div id="toasts"></div></main></div>
 <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"}}</script>
@@ -352,6 +355,69 @@ function segmentEditor(){
   updateSelectionVisuals();
 }
 async function applySegment(child,length,radii){setStatus('正在更新骨段 Mesh...');try{const r=await fetch('/api/segment',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,child,length,radii})});if(!r.ok)throw Error(await r.text());await load(selected,true,true);selectedSegment=child;segmentEditor()}catch(e){setStatus('骨段更新失败：'+e.message,true)}}
+// ---------------------------- head editor --------------------------------
+const HEAD_KEYS=['head_length','head_width','head_depth','jaw','eye'];
+const HEAD_FALLBACK_RANGES={
+  head_length:[0.8,1.25], head_width:[0.85,1.15], head_depth:[0.85,1.15],
+  jaw:[0.8,1.2], eye:[0.85,1.15],
+};
+const HEAD_FALLBACK_LABELS={
+  head_length:'头长', head_width:'头宽', head_depth:'头厚', jaw:'下颚', eye:'眼球',
+};
+function headConfig(){return (skeletonData&&skeletonData.head)||{};}
+function headRanges(){return (skeletonData&&skeletonData.head_ranges)||HEAD_FALLBACK_RANGES;}
+function headLabels(){return (skeletonData&&skeletonData.head_labels)||HEAD_FALLBACK_LABELS;}
+function currentHead(){
+  const params={};
+  HEAD_KEYS.forEach((key)=>{
+    const input=document.querySelector('#head-'+key);
+    params[key]=input?Number(input.value):Number(headConfig()[key]??1);
+  });
+  return params;
+}
+function renderHeadEditor(){
+  const host=document.querySelector('#head-editor');
+  if(!host)return;
+  if(!skeletonData){host.className='segment-empty';host.textContent='正在读取头部参数...';return;}
+  const values=headConfig(), ranges=headRanges(), labels=headLabels();
+  host.className='';
+  host.innerHTML=HEAD_KEYS.map((key)=>{
+    const range=ranges[key]||[0.8,1.2];
+    return sliderTemplate({
+      id:'head-'+key,label:labels[key]||key,
+      min:range[0],max:range[1],step:0.01,
+      value:Number(values[key]??1),decimals:2,
+    });
+  }).join('')+
+  `<div class="segment-tools"><button class="small" id="head-reset">重置头部</button></div>
+   <p class="sub">头长沿世界 +Y（下巴→头顶）；宽度/厚度分别对应 X/Z；眼球半径按 √(宽×厚) 缩放。</p>`;
+  HEAD_KEYS.forEach((key)=>wireSlider(host,{id:'head-'+key,onChange:()=>applyHead()}));
+  const reset=document.querySelector('#head-reset');
+  if(reset)reset.onclick=resetHead;
+}
+async function applyHead(){
+  if(!selected)return;
+  const params=currentHead();
+  setStatus('正在更新头部...');
+  if(window.smplxInvalidateReferenceAlignment)window.smplxInvalidateReferenceAlignment();
+  try{
+    const response=await fetch('/api/head',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,...params})});
+    if(!response.ok)throw Error(await response.text());
+    await load(selected,true,true);
+    setStatus('头部已更新（长度/宽度/厚度/下颚/眼球）');
+  }catch(error){setStatus('头部更新失败：'+error.message,true);}
+}
+async function resetHead(){
+  if(!selected)return;
+  setStatus('正在重置头部...');
+  if(window.smplxInvalidateReferenceAlignment)window.smplxInvalidateReferenceAlignment();
+  try{
+    const response=await fetch('/api/head/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected})});
+    if(!response.ok)throw Error(await response.text());
+    await load(selected,true,true);
+    setStatus('头部已重置');
+  }catch(error){setStatus('头部重置失败：'+error.message,true);}
+}
 // ---------------------------- bone selection highlight ---------------------
 // Selecting a bone thickens it, tints its own skinned vertices and marks the
 // interior division points of the current cross-section profile.
@@ -460,6 +526,7 @@ function addSkeleton(data,groundOffsetY){
   }
   scene.add(skeletonRoot);
   segmentEditor();
+  renderHeadEditor();
   realignReference();
 }
 // OBJLoader expands a mesh into one vertex per triangle corner (3 x 20908 =
@@ -598,6 +665,9 @@ refHide.onclick=()=>{
   setStatus(referenceHidden?'参考图已隐藏':'参考图已显示');
 };
 refClear.onclick=()=>{clearReference();setStatus('已移除参考图');};
+const exportGlb=document.querySelector('#export-glb'), exportParams=document.querySelector('#export-params');
+exportGlb.onclick=()=>{if(!selected)return;setStatus('正在导出 T-pose GLB（含 55 关节蒙皮）...');window.location.href='/api/export/glb/'+selected;};
+exportParams.onclick=()=>{if(!selected)return;setStatus('正在导出 identity 参数 JSON...');window.location.href='/api/export/params/'+selected;};
 async function init(){const r=await fetch('/api/models');if(!r.ok)throw Error('无法读取模型信息');const data=await r.json();for(const item of data.models){const option=document.createElement('option');option.value=item.gender;option.textContent=item.label+(item.available?'':'（未安装）');option.disabled=!item.available;choices.append(option)}choices.onchange=()=>load(choices.value,true);const first=data.models.find(x=>x.available);if(first)load(first.gender,true);else setStatus('未找到可用 SMPL-X 模型文件',true)}
 init().catch(e=>setStatus(e.message,true));
 </script></body></html>

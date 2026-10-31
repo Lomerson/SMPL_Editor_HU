@@ -60,6 +60,50 @@ def handler_factory(cache: ModelCache):
                 self.end_headers()
                 self.wfile.write(data)
                 return
+            if path.startswith("/api/export/glb/"):
+                gender = path.rsplit("/", 1)[-1]
+                try:
+                    target = cache.glb(gender)
+                except FileNotFoundError:
+                    self.send_error(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
+                    return
+                except Exception as exc:
+                    self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                    return
+                data = target.read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "model/gltf-binary")
+                self.send_header(
+                    "Content-Disposition",
+                    f'attachment; filename="{target.name}"',
+                )
+                self.send_header("Cache-Control", "no-store, max-age=0")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            if path.startswith("/api/export/params/"):
+                gender = path.rsplit("/", 1)[-1]
+                try:
+                    target = cache.params(gender)
+                except FileNotFoundError:
+                    self.send_error(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
+                    return
+                except Exception as exc:
+                    self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                    return
+                data = target.read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header(
+                    "Content-Disposition",
+                    f'attachment; filename="{target.name}"',
+                )
+                self.send_header("Cache-Control", "no-store, max-age=0")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if path.startswith("/api/skeleton/"):
                 gender = path.rsplit("/", 1)[-1]
                 try:
@@ -132,6 +176,23 @@ def handler_factory(cache: ModelCache):
                         bool(data.get("full_body", False)),
                     )
                     self.send_json({"ok": True})
+                    return
+                if path == "/api/head":
+                    cache.update_head(
+                        gender,
+                        {
+                            "head_length": float(data.get("head_length", 1.0)),
+                            "head_width": float(data.get("head_width", 1.0)),
+                            "head_depth": float(data.get("head_depth", 1.0)),
+                            "jaw": float(data.get("jaw", 1.0)),
+                            "eye": float(data.get("eye", 1.0)),
+                        },
+                    )
+                    self.send_json({"ok": True, "head": cache.head(gender)})
+                    return
+                if path == "/api/head/reset":
+                    cache.reset_head(gender)
+                    self.send_json({"ok": True, "head": cache.head(gender)})
                     return
                 if path == "/api/segment":
                     radii = data["radii"]

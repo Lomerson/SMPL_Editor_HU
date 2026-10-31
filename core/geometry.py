@@ -15,6 +15,7 @@ import numpy as np
 from core.config import GENDERS, JOINT_NAMES
 from core.deform import RestDeformer, pose_is_identity
 from core.geometry_legacy import legacy_geometry
+from core.head import HEAD_LABELS, HEAD_RANGES, HeadDeformer, is_default
 
 
 def invalidate(cache, gender: str):
@@ -31,8 +32,10 @@ def _rest_state(cache, gender: str):
     model = cache._model(gender)
     parents = model.parents.cpu().numpy().astype(np.int32)
     segments = cache._segments(gender)
+    head_params = cache.head_configs.get(gender)
+    head_edit = bool(head_params) and not is_default(head_params)
 
-    if not segments:
+    if not segments and not head_edit:
         vertices = model.v_template.detach().cpu().numpy().astype(np.float32)
         joints = (
             model.J_regressor @ model.v_template
@@ -41,6 +44,8 @@ def _rest_state(cache, gender: str):
 
     deformer = RestDeformer(model, segments)
     vertices, joints = deformer.deform_rest()
+    if head_edit:
+        vertices, joints = HeadDeformer(model, joints, head_params).apply(vertices)
     return model, vertices, joints, parents, deformer
 
 
@@ -61,6 +66,8 @@ def geometry(cache, gender: str):
     model = cache._model(gender)
     parents = model.parents.cpu().numpy().astype(np.int32)
     segments = cache._segments(gender)
+    head_params = cache.head_configs.get(gender)
+    head_edit = bool(head_params) and not is_default(head_params)
     body_pose = cache.poses.get(gender)
     global_orient = cache.global_orients.get(gender)
 
@@ -68,7 +75,7 @@ def geometry(cache, gender: str):
     # viewer (SMPL-X's forward pass differs from ``v_template`` by ~1e-7).
     # The custom LBS matches the forward pass exactly once a pose is set, so
     # only this canonical T-pose shortcut is needed.
-    if not segments and pose_is_identity(body_pose, global_orient):
+    if not segments and not head_edit and pose_is_identity(body_pose, global_orient):
         _model, output = cache._output(gender)
         vertices = output.vertices[0].cpu().numpy().astype(np.float32)
         joints = output.joints[0, :len(parents)].cpu().numpy().astype(np.float32)
@@ -98,6 +105,9 @@ def skeleton(cache, gender: str) -> dict:
         "parents": parents.tolist(),
         "names": JOINT_NAMES,
         "segments": cache._segments(gender),
+        "head": cache.head(gender),
+        "head_ranges": {key: list(value) for key, value in HEAD_RANGES.items()},
+        "head_labels": HEAD_LABELS,
     }
 
 

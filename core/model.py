@@ -6,10 +6,11 @@ from pathlib import Path
 
 import numpy as np
 
-from core import detector, export, geometry
+from core import detector, export, geometry, glb
 from core.config import DEVICE_CHOICES, GENDERS
 from core.deform import LENGTH_MAX, LENGTH_MIN
 from core.fitting import init as fitting_init
+from core.head import HEAD_DEFAULTS, normalize_head_params
 
 def resolve_device(requested: str = "auto") -> tuple[str, str]:
     """Decide where SMPL-X inference runs, before any weights are loaded.
@@ -67,6 +68,7 @@ class ModelCache:
         self.outputs = {}
         self.segment_configs = {}
         self.segment_sequences = {}
+        self.head_configs = {}
         self._sequence = 0
         self.geometry_cache = {}
 
@@ -152,6 +154,26 @@ class ModelCache:
 
     def _segments(self, gender: str):
         return self.segment_configs.setdefault(gender, {})
+
+    def head(self, gender: str) -> dict:
+        values = dict(HEAD_DEFAULTS)
+        values.update(self.head_configs.get(gender, {}))
+        return values
+
+    def update_head(self, gender: str, params: dict):
+        if gender not in GENDERS or not self.available(gender):
+            raise FileNotFoundError(gender)
+        values = normalize_head_params(params)
+        with self.lock:
+            self.head_configs[gender] = values
+            self._invalidate_geometry(gender)
+
+    def reset_head(self, gender: str):
+        if gender not in GENDERS or not self.available(gender):
+            raise FileNotFoundError(gender)
+        with self.lock:
+            self.head_configs.pop(gender, None)
+            self._invalidate_geometry(gender)
 
     def _sync_joint_girth(self, gender: str, joint: int, value: float, parents):
         """Give every bone incident to ``joint`` the same endpoint girth.
@@ -282,6 +304,7 @@ class ModelCache:
             self.global_orients.pop(gender, None)
             self.segment_configs.pop(gender, None)
             self.segment_sequences.pop(gender, None)
+            self.head_configs.pop(gender, None)
             self.outputs.pop(gender, None)
             self._invalidate_geometry(gender)
 
@@ -373,6 +396,12 @@ class ModelCache:
 
     def obj(self, gender: str) -> Path:
         return export.export_obj(self, gender)
+
+    def glb(self, gender: str) -> Path:
+        return glb.export_glb(self, gender)
+
+    def params(self, gender: str) -> Path:
+        return glb.export_params(self, gender)
 
     def skeleton(self, gender: str) -> dict:
         return geometry.skeleton(self, gender)
