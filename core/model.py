@@ -69,6 +69,7 @@ class ModelCache:
         self.segment_configs = {}
         self.segment_sequences = {}
         self.head_configs = {}
+        self.displacements = {}
         self._sequence = 0
         self.geometry_cache = {}
 
@@ -173,6 +174,33 @@ class ModelCache:
             raise FileNotFoundError(gender)
         with self.lock:
             self.head_configs.pop(gender, None)
+            self._invalidate_geometry(gender)
+
+    def displacement(self, gender: str):
+        return self.displacements.get(gender)
+
+    def update_displacement(self, gender: str, values):
+        if gender not in GENDERS or not self.available(gender):
+            raise FileNotFoundError(gender)
+        array = np.asarray(values, dtype=np.float32)
+        expected = int(self._model(gender).v_template.shape[0])
+        if array.shape != (expected, 3):
+            raise ValueError(
+                f"displacement must have shape ({expected}, 3), got {array.shape}"
+            )
+        if not np.isfinite(array).all():
+            raise ValueError("displacement contains non-finite values")
+        if float(np.abs(array).max()) > 0.5:
+            raise ValueError("displacement magnitude is implausibly large (>0.5 m)")
+        with self.lock:
+            self.displacements[gender] = array.copy()
+            self._invalidate_geometry(gender)
+
+    def reset_displacement(self, gender: str):
+        if gender not in GENDERS or not self.available(gender):
+            raise FileNotFoundError(gender)
+        with self.lock:
+            self.displacements.pop(gender, None)
             self._invalidate_geometry(gender)
 
     def _sync_joint_girth(self, gender: str, joint: int, value: float, parents):
@@ -305,6 +333,7 @@ class ModelCache:
             self.segment_configs.pop(gender, None)
             self.segment_sequences.pop(gender, None)
             self.head_configs.pop(gender, None)
+            self.displacements.pop(gender, None)
             self.outputs.pop(gender, None)
             self._invalidate_geometry(gender)
 
@@ -402,6 +431,9 @@ class ModelCache:
 
     def params(self, gender: str) -> Path:
         return glb.export_params(self, gender)
+
+    def displacement_export(self, gender: str) -> Path:
+        return glb.export_displacement(self, gender)
 
     def fourview(self, gender: str) -> Path:
         return fourview.export_fourview(self, gender)

@@ -125,6 +125,16 @@ def _params(cache, gender):
             "left": np.asarray(joints[23], dtype=np.float32).tolist(),
             "right": np.asarray(joints[24], dtype=np.float32).tolist(),
         },
+        "displacement": (
+            None
+            if cache.displacement(gender) is None
+            else {
+                "file": f"avatar_{gender}_displacement.npy",
+                "shape": [int(cache.displacement(gender).shape[0]), 3],
+                "dtype": "float32",
+                "max_abs_m": float(np.abs(cache.displacement(gender)).max()),
+            }
+        ),
         "coordinate_system": "glTF Y-up; rest T-pose",
         "tpose": True,
         "has_skin": True,
@@ -306,6 +316,25 @@ def export_params(cache, gender: str) -> Path:
         Path(temporary).write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        Path(temporary).replace(target)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    displacement = cache.displacement(gender)
+    if displacement is not None:
+        export_displacement(cache, gender)
+    return target
+
+
+def export_displacement(cache, gender: str) -> Path:
+    displacement = cache.displacement(gender)
+    if displacement is None:
+        raise FileNotFoundError("no displacement imported")
+    cache.cache_dir.mkdir(parents=True, exist_ok=True)
+    target = cache.cache_dir / f"avatar_{gender}_displacement.npy"
+    fd, temporary = tempfile.mkstemp(suffix=".npy", dir=cache.cache_dir)
+    os.close(fd)
+    try:
+        np.save(temporary, np.asarray(displacement, dtype=np.float32))
         Path(temporary).replace(target)
     finally:
         Path(temporary).unlink(missing_ok=True)

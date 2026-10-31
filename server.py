@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
+
+import numpy as np
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -104,6 +107,28 @@ def handler_factory(cache: ModelCache):
                 self.end_headers()
                 self.wfile.write(data)
                 return
+            if path.startswith("/api/export/displacement/"):
+                gender = path.rsplit("/", 1)[-1]
+                try:
+                    target = cache.displacement_export(gender)
+                except FileNotFoundError:
+                    self.send_error(HTTPStatus.NOT_FOUND, "No imported displacement")
+                    return
+                except Exception as exc:
+                    self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                    return
+                data = target.read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header(
+                    "Content-Disposition",
+                    f'attachment; filename="{target.name}"',
+                )
+                self.send_header("Cache-Control", "no-store, max-age=0")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if path.startswith("/api/export/fourview/"):
                 gender = path.rsplit("/", 1)[-1]
                 try:
@@ -174,10 +199,36 @@ def handler_factory(cache: ModelCache):
                 return
             self.send_json(result)
 
+        def _handle_displacement(self, gender):
+            """Import a Blender shape-key displacement as a (N, 3) .npy file."""
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                size = 0
+            if size <= 0:
+                self.send_error(HTTPStatus.BAD_REQUEST, "empty displacement upload")
+                return
+            if size > 16 * 1024 * 1024:
+                self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "displacement larger than 16 MiB")
+                return
+            payload = self.rfile.read(size)
+            try:
+                array = np.load(io.BytesIO(payload), allow_pickle=False)
+                if not isinstance(array, np.ndarray):
+                    raise ValueError("expected a single .npy array")
+                cache.update_displacement(gender, array)
+            except Exception as exc:
+                self.send_error(HTTPStatus.UNPROCESSABLE_ENTITY, f"{type(exc).__name__}: {exc}")
+                return
+            self.send_json({"ok": True, "has_displacement": True})
+
         def do_POST(self):
             path = urlparse(self.path).path
             if path == "/api/reference":
                 self._handle_reference()
+                return
+            if path.startswith("/api/displacement/") and path != "/api/displacement/reset":
+                self._handle_displacement(path.rsplit("/", 1)[-1])
                 return
             try:
                 size = int(self.headers.get("Content-Length", "0"))
@@ -215,6 +266,10 @@ def handler_factory(cache: ModelCache):
                 if path == "/api/head/reset":
                     cache.reset_head(gender)
                     self.send_json({"ok": True, "head": cache.head(gender)})
+                    return
+                if path == "/api/displacement/reset":
+                    cache.reset_displacement(gender)
+                    self.send_json({"ok": True, "has_displacement": False})
                     return
                 if path == "/api/segment":
                     radii = data["radii"]

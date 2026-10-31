@@ -39,6 +39,7 @@
   .export-buttons button { flex:1 1 0; min-width:0; padding:0 4px; font-size:11px; text-align:center; }
   #skin-opacity-row { grid-template-columns:44px minmax(0,1fr) 40px; }
   #skin-opacity-host { margin-top:8px; }
+  #disp-file { display:none; }
   .step-btn:disabled { color:#697383; cursor:not-allowed; opacity:.5; }
   .skeleton-locked #seg-length-row { cursor:not-allowed; } .ref-row { display:flex; gap:8px; align-items:stretch; } #ref-pick { flex:1 1 auto; min-width:0; text-align:center; } #ref-hide, #ref-clear { flex:0 0 62px; min-width:62px; text-align:center; } #ref-file { display:none; } .ref-info { margin:8px 0 0; } @media(max-width:700px) { #app{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)} aside{padding:14px; border-right:0; border-bottom:1px solid #303642; gap:12px}.gender{grid-template-columns:repeat(3,1fr)} button{font-size:12px;text-align:center} #status{margin-top:0} }
 </style>
@@ -50,7 +51,7 @@
   <details class="panel" open><summary class="section-title">骨段编辑</summary><div id="segment-editor" class="segment-empty">点击一条黄色骨骼连线以编辑该骨段。</div></details>
   <details class="panel" open><summary class="section-title">头部编辑</summary><div id="head-editor" class="segment-empty">正在读取头部参数...</div></details>
   <details class="panel" open><summary class="section-title">参考图</summary><div class="ref-row"><button id="ref-pick">选择图片</button><button id="ref-hide" class="small" disabled>隐藏</button><button id="ref-clear" class="small" disabled>移除</button></div><input id="ref-file" type="file" accept="image/png,image/jpeg,image/jpg,image/webp,image/bmp,image/gif,image/tiff,image/*"><p class="sub ref-info" id="ref-info">未选择图片。上传后自动用 AnimePoseDetector 对齐双眼。</p></details>
-  <details class="panel"><summary class="section-title">导出</summary><div class="segment-tools export-buttons"><button id="export-glb" class="small" title="下载带 55 关节蒙皮的 T-pose GLB">GLB</button><button id="export-params" class="small" title="下载 identity 参数 JSON">参数</button><button id="export-fourview" class="small" title="下载四视图 PNG + views.json">四视图</button></div><p class="sub">GLB 带 55 关节蒙皮（Blender 会得到 Armature + Vertex Groups）；四视图为剪影 + 眼睛位置；导出始终是 T-pose identity，不包含当前摆姿。</p></details>
+  <details class="panel"><summary class="section-title">导出</summary><div class="segment-tools export-buttons"><button id="export-glb" class="small" title="下载带 55 关节蒙皮的 T-pose GLB">GLB</button><button id="export-params" class="small" title="下载 identity 参数 JSON">参数</button><button id="export-fourview" class="small" title="下载四视图 PNG + views.json">四视图</button></div><div class="segment-tools export-buttons"><button id="disp-pick" class="small" title="导入 Blender shape key 导出的 (N,3) .npy">导入位移</button><button id="disp-clear" class="small" disabled title="移除已导入的位移">清除位移</button></div><input id="disp-file" type="file" accept=".npy,application/octet-stream"><p class="sub">GLB 带 55 关节蒙皮（Blender 会得到 Armature + Vertex Groups）；四视图为剪影 + 眼睛位置；导出始终是 T-pose identity，不包含当前摆姿。位移会应用到 GLB/四视图。</p></details>
   <div id="status">正在读取模型信息...</div>
 </aside><main><canvas id="viewer"></canvas><div class="hud">点击黄色身体关节后拖动<br>空白处拖动旋转 · 滚轮缩放</div><div id="toasts"></div></main></div>
 <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"}}</script>
@@ -584,6 +585,22 @@ function renderSkinOpacity(){
     applySkinOpacity();
   }});
 }
+function updateDisplacementButtons(present){
+  const clear=document.querySelector('#disp-clear');
+  if(clear)clear.disabled=!present;
+}
+async function importDisplacement(file){
+  if(!selected||!file)return;
+  setStatus('正在导入 Blender 位移 '+file.name+' ...');
+  try{
+    const buffer=await file.arrayBuffer();
+    const response=await fetch('/api/displacement/'+selected,{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:buffer});
+    if(!response.ok)throw Error((await response.text()).slice(0,160));
+    await load(selected,true,true);
+    updateDisplacementButtons(true);
+    setStatus('已导入位移：'+file.name+'（应用到 rest mesh / GLB / 四视图）');
+  }catch(error){setStatus('位移导入失败：'+error.message,true);}
+}
 async function load(gender,edited=false,force=false){
   if(selected===gender&&!force)return;
   const shouldFrame=selected!==gender||!meshRoot;
@@ -604,6 +621,7 @@ async function load(gender,edited=false,force=false){
     scene.add(obj);
     paintMesh();
     addSkeleton(skeleton,groundOffset);
+    updateDisplacementButtons(!!skeleton.has_displacement);
     ensureOwners(gender);
     if(shouldFrame)frame(obj);
     applySkinOpacity();
@@ -699,6 +717,10 @@ const exportGlb=document.querySelector('#export-glb'), exportParams=document.que
 exportGlb.onclick=()=>{if(!selected)return;setStatus('正在导出 T-pose GLB（含 55 关节蒙皮）...');window.location.href='/api/export/glb/'+selected;};
 exportParams.onclick=()=>{if(!selected)return;setStatus('正在导出 identity 参数 JSON...');window.location.href='/api/export/params/'+selected;};
 exportFourview.onclick=()=>{if(!selected)return;setStatus('正在导出四视图（正/背/左/右）...');window.location.href='/api/export/fourview/'+selected;};
+const dispPick=document.querySelector('#disp-pick'), dispClear=document.querySelector('#disp-clear'), dispFile=document.querySelector('#disp-file');
+dispPick.onclick=()=>dispFile.click();
+dispFile.onchange=()=>{const file=dispFile.files&&dispFile.files[0];dispFile.value='';if(file)importDisplacement(file);};
+dispClear.onclick=async()=>{if(!selected)return;setStatus('正在清除位移...');try{const response=await fetch('/api/displacement/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected})});if(!response.ok)throw Error(await response.text());await load(selected,true,true);updateDisplacementButtons(false);setStatus('已清除位移');}catch(error){setStatus('清除位移失败：'+error.message,true);}};
 async function init(){renderSkinOpacity();const r=await fetch('/api/models');if(!r.ok)throw Error('无法读取模型信息');const data=await r.json();for(const item of data.models){const option=document.createElement('option');option.value=item.gender;option.textContent=item.label+(item.available?'':'（未安装）');option.disabled=!item.available;choices.append(option)}choices.onchange=()=>load(choices.value,true);const first=data.models.find(x=>x.available);if(first)load(first.gender,true);else setStatus('未找到可用 SMPL-X 模型文件',true)}
 init().catch(e=>setStatus(e.message,true));
 </script></body></html>
