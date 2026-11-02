@@ -84,6 +84,19 @@ class HistoryTest(unittest.TestCase):
         self.assertIsNone(self.cache.displacement(GENDER))
         self.assertAlmostEqual(self.cache.head(GENDER)["head_length"], 1.1)
 
+    def test_pose_edit_is_undoable(self):
+        _model, _vertices, base_joints, _parents = self.cache._geometry(GENDER)
+        target = (np.asarray(base_joints[21], dtype=np.float64) + np.array([0.0, 0.05, 0.0])).tolist()
+        self.cache.pose_joint(GENDER, 21, target, full_body=True)
+        history = self.cache.history_state(GENDER)
+        self.assertEqual(len(history["entries"]), 2)
+        self.assertIn("姿态", history["entries"][-1]["label"])
+
+        result = self.cache.undo(GENDER)
+        self.assertTrue(result["ok"])
+        _model, _vertices, joints, _parents = self.cache._geometry(GENDER)
+        self.assertLess(float(np.linalg.norm(joints[21] - base_joints[21])), 1e-5)
+
     def test_auto_fit_is_one_history_entry(self):
         if not FRONT.is_file():
             self.skipTest("missing front reference")
