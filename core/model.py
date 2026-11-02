@@ -11,6 +11,7 @@ from core.config import DEVICE_CHOICES, GENDERS
 from core.deform import LENGTH_MAX, LENGTH_MIN
 from core.fitting import init as fitting_init
 from core.head import HEAD_DEFAULTS, normalize_head_params
+from core.symmetry import joint_targets, mirror_target, segment_targets
 
 def resolve_device(requested: str = "auto") -> tuple[str, str]:
     """Decide where SMPL-X inference runs, before any weights are loaded.
@@ -254,7 +255,30 @@ class ModelCache:
             value = float(candidates[-1][2])
             self._sync_joint_girth(gender, joint, value, parents)
 
-    def update_segment(self, gender: str, child: int, length: float, radii: list[float]):
+    def _apply_update_segment_locked(self, gender: str, child: int, length: float,
+                                     radii: list[float]):
+        if child == 15:
+            # The head segment (neck->head) is owned by the head deformer.  A
+            # girth edit must not reset a length written by the reference fit.
+            stored_length = float(
+                self._segments(gender).get(str(child), {}).get("length", 1.0)
+            )
+        else:
+            stored_length = float(length)
+        radii = [float(value) for value in radii]
+        self._segments(gender)[str(child)] = {
+            "length": stored_length,
+            "radii": radii,
+        }
+        self._sequence += 1
+        self.segment_sequences.setdefault(gender, {})[str(child)] = self._sequence
+        parents = self._model(gender).parents.cpu().numpy()
+        self._sync_joint_girth(gender, int(parents[child]), radii[0], parents)
+        self._sync_joint_girth(gender, child, radii[-1], parents)
+        self._invalidate_geometry(gender)
+
+    def update_segment(self, gender: str, child: int, length: float,
+                       radii: list[float], symmetric: bool = False):
         if gender not in GENDERS or not self.available(gender):
             raise FileNotFoundError(gender)
         if child < 1 or child > 21:
@@ -270,29 +294,13 @@ class ModelCache:
             raise ValueError(
                 f"length must be between {LENGTH_MIN:.2f} and {LENGTH_MAX:.2f}"
             )
+        targets = segment_targets(child, symmetric)
         with self.lock:
-            if child == 15:
-                # The head segment (neck->head) is owned by the upcoming head
-                # deformer.  A girth edit must not reset a length written by
-                # the reference fit, so keep the stored value.
-                stored_length = float(
-                    self._segments(gender).get(str(child), {}).get("length", 1.0)
-                )
-            else:
-                stored_length = length
-            radii = [float(value) for value in radii]
-            self._segments(gender)[str(child)] = {
-                "length": stored_length,
-                "radii": radii,
-            }
-            self._sequence += 1
-            self.segment_sequences.setdefault(gender, {})[str(child)] = self._sequence
-            parents = self._model(gender).parents.cpu().numpy()
-            self._sync_joint_girth(gender, int(parents[child]), radii[0], parents)
-            self._sync_joint_girth(gender, child, radii[-1], parents)
-            self._invalidate_geometry(gender)
+            for target in targets:
+                self._apply_update_segment_locked(gender, target, length, radii)
 
-    def reset_segment(self, gender: str, child: int, keep_length: bool = False):
+    def reset_segment(self, gender: str, child: int, keep_length: bool = False,
+                      symmetric: bool = False):
         """Reset a segment.
 
         ``keep_length=False`` restores both the bone length and the cross-section
@@ -305,20 +313,22 @@ class ModelCache:
             raise FileNotFoundError(gender)
         if child < 1 or child > 21:
             raise ValueError("Invalid body segment")
+        targets = segment_targets(child, symmetric)
         with self.lock:
-            entry = self._segments(gender).get(str(child))
-            if keep_length and entry is not None:
-                entry["radii"] = [1.0, 1.0, 1.0]
-                # A reset cross-section is a real edit of the shared joints,
-                # unlike deleting the entry (where an adjacent bone may still
-                # own the joint value).
-                parents = self._model(gender).parents.cpu().numpy()
-                self._sync_joint_girth(gender, int(parents[child]), 1.0, parents)
-                self._sync_joint_girth(gender, child, 1.0, parents)
-            else:
-                self._segments(gender).pop(str(child), None)
-                self.segment_sequences.get(gender, {}).pop(str(child), None)
-            self._invalidate_geometry(gender)
+            parents = self._model(gender).parents.cpu().numpy()
+            for target in targets:
+                entry = self._segments(gender).get(str(target))
+                if keep_length and entry is not None:
+                    entry["radii"] = [1.0, 1.0, 1.0]
+                    # A reset cross-section is a real edit of the shared joints,
+                    # unlike deleting the entry (where an adjacent bone may still
+                    # own the joint value).
+                    self._sync_joint_girth(gender, int(parents[target]), 1.0, parents)
+                    self._sync_joint_girth(gender, target, 1.0, parents)
+                else:
+                    self._segments(gender).pop(str(target), None)
+                    self.segment_sequences.get(gender, {}).pop(str(target), None)
+                self._invalidate_geometry(gender)
 
     def reset(self, gender: str):
         if gender not in GENDERS or not self.available(gender):
@@ -338,7 +348,7 @@ class ModelCache:
             self._invalidate_geometry(gender)
 
     def pose_joint(self, gender: str, joint: int, target: list[float], full_body: bool,
-                   iterations: int | None = None):
+                   iterations: int | None = None, symmetric: bool = False):
         if gender not in GENDERS or not self.available(gender):
             raise FileNotFoundError(gender)
         if joint < 1 or joint > 21:
@@ -348,27 +358,41 @@ class ModelCache:
             model = self._model(gender)
             base = self._pose(gender, model).clone()
             parents = model.parents.cpu().tolist()
-            if full_body:
-                chain = []
-                cursor = joint
+            pairs = []
+            for index, node in enumerate(joint_targets(joint, symmetric)):
+                pairs.append((node, target if index == 0 else mirror_target(target)))
+            chains = []
+            chains_to_joint = []
+            for node, _target in pairs:
+                if full_body:
+                    chain = []
+                    cursor = node
+                    while cursor > 0:
+                        chain.append(cursor)
+                        cursor = parents[cursor]
+                else:
+                    # A joint's origin is attached to its parent in SMPL-X. To
+                    # move the selected point while keeping upstream points
+                    # fixed, rotate its direct parent.
+                    parent = parents[node]
+                    if parent <= 0:
+                        raise ValueError("This root-adjacent joint requires full-body IK")
+                    chain = [parent]
+                chain_to_joint = []
+                cursor = node
                 while cursor > 0:
-                    chain.append(cursor)
+                    chain_to_joint.append(cursor)
                     cursor = parents[cursor]
-            else:
-                # A joint's origin is attached to its parent in SMPL-X. To move
-                # the selected point while keeping upstream points fixed, rotate
-                # its direct parent; the selected point and its child subtree
-                # then move together as one local branch.
-                parent = parents[joint]
-                if parent <= 0:
-                    raise ValueError("This root-adjacent joint requires full-body IK")
-                chain = [parent]
+                chain_to_joint.reverse()
+                chains.append(chain)
+                chains_to_joint.append(chain_to_joint)
+
             variables = torch.nn.Parameter(base.clone())
             target_tensor = torch.tensor(
-                target, dtype=torch.float32, device=self.device
-            ).view(1, 3)
-            # The visible skeleton is the *length-scaled* one (segment editor), so
-            # the solver has to compare against that same joint, not the raw one.
+                [pair[1] for pair in pairs], dtype=torch.float32, device=self.device
+            ).view(-1, 3)
+            # The visible skeleton is the *length-scaled* one (segment editor),
+            # so the solver compares against that same joint, not the raw one.
             factors = np.ones(len(parents), dtype=np.float32)
             segment_config = self._segments(gender)
             for index in range(1, min(22, len(parents))):
@@ -376,14 +400,8 @@ class ModelCache:
                     segment_config.get(str(index), {}).get("length", 1.0)
                 )
             lengths = torch.tensor(factors, dtype=torch.float32, device=self.device)
-            chain_to_joint = []
-            cursor = joint
-            while cursor > 0:
-                chain_to_joint.append(cursor)
-                cursor = parents[cursor]
-            chain_to_joint.reverse()
 
-            def scaled_position(output):
+            def scaled_position(output, chain_to_joint):
                 joints = output.joints[0]
                 position = joints[0]
                 for node in chain_to_joint:
@@ -393,14 +411,20 @@ class ModelCache:
 
             optimizer = torch.optim.Adam([variables], lr=0.035)
             editable = torch.zeros_like(variables)
-            for node in chain:
-                editable[:, (node - 1) * 3:node * 3] = 1
+            for chain in chains:
+                for node in chain:
+                    editable[:, (node - 1) * 3:node * 3] = 1
             global_orient = self._orient(gender, model)
             for _ in range(iterations if iterations is not None else (36 if full_body else 24)):
                 optimizer.zero_grad(set_to_none=True)
                 pose = variables * editable + base * (1 - editable)
                 output = model(body_pose=pose, global_orient=global_orient)
-                loss = (scaled_position(output) - target_tensor[0]).square().sum()
+                loss = None
+                for index, chain_to_joint in enumerate(chains_to_joint):
+                    squared = (
+                        scaled_position(output, chain_to_joint) - target_tensor[index]
+                    ).square().sum()
+                    loss = squared if loss is None else loss + squared
                 loss = loss + 0.003 * ((pose - base) * editable).square().mean()
                 loss.backward()
                 optimizer.step()

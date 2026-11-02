@@ -16,6 +16,7 @@ from core.config import GENDERS, JOINT_NAMES
 from core.deform import RestDeformer, pose_is_identity
 from core.geometry_legacy import legacy_geometry
 from core.head import HEAD_LABELS, HEAD_RANGES, HeadDeformer, is_default
+from core.symmetry import SYMMETRY_JOINTS, SYMMETRY_SEGMENTS
 
 
 def invalidate(cache, gender: str):
@@ -113,6 +114,10 @@ def skeleton(cache, gender: str) -> dict:
         "head_ranges": {key: list(value) for key, value in HEAD_RANGES.items()},
         "head_labels": HEAD_LABELS,
         "has_displacement": cache.displacement(gender) is not None,
+        "symmetry": {
+            "segments": {str(key): value for key, value in SYMMETRY_SEGMENTS.items()},
+            "joints": {str(key): value for key, value in SYMMETRY_JOINTS.items()},
+        },
     }
 
 

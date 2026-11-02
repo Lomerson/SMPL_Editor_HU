@@ -278,6 +278,7 @@ def handler_factory(cache: ModelCache):
                         int(data["joint"]),
                         [float(value) for value in target],
                         bool(data.get("full_body", False)),
+                        symmetric=bool(data.get("symmetric", False)),
                     )
                     self.send_json({"ok": True})
                     return
@@ -317,6 +318,7 @@ def handler_factory(cache: ModelCache):
                         int(data["child"]),
                         float(data["length"]),
                         [float(value) for value in radii],
+                        symmetric=bool(data.get("symmetric", False)),
                     )
                     self.send_json({"ok": True})
                     return
@@ -324,6 +326,7 @@ def handler_factory(cache: ModelCache):
                     cache.reset_segment(
                         gender, int(data["child"]),
                         keep_length=bool(data.get("keep_length", False)),
+                        symmetric=bool(data.get("symmetric", False)),
                     )
                     self.send_json({"ok": True})
                     return
