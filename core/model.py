@@ -308,12 +308,14 @@ class ModelCache:
                     "label": None,
                     "history": self._history_state_locked(history),
                 }
+            current = history["entries"][index]
             entry = history["entries"][index - 1]
             history["cursor"] = entry["id"]
             self._restore_locked(gender, entry["snapshot"])
             return {
                 "ok": True,
-                "label": entry["label"],
+                "label": current["label"],
+                "current_label": entry["label"],
                 "history": self._history_state_locked(history),
             }
 
