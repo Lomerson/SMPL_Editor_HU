@@ -269,6 +269,12 @@ def handler_factory(cache: ModelCache):
                     cache.reset(gender)
                     self.send_json({"ok": True})
                     return
+                if path == "/api/undo":
+                    self.send_json(cache.undo(gender))
+                    return
+                if path == "/api/history/jump":
+                    self.send_json(cache.jump_history(gender, int(data["id"])))
+                    return
                 if path == "/api/pose":
                     target = data["target"]
                     if not isinstance(target, list) or len(target) != 3:

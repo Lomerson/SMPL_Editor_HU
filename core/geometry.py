@@ -118,6 +118,7 @@ def skeleton(cache, gender: str) -> dict:
             "segments": {str(key): value for key, value in SYMMETRY_SEGMENTS.items()},
             "joints": {str(key): value for key, value in SYMMETRY_JOINTS.items()},
         },
+        "history": cache.history_state(gender),
     }
 
 

@@ -1,13 +1,14 @@
 """SMPL-X model state: loading, device placement, pose/orient caches, segments."""
 from __future__ import annotations
 
+import copy
 import threading
 from pathlib import Path
 
 import numpy as np
 
 from core import detector, export, fourview, geometry, glb
-from core.config import DEVICE_CHOICES, GENDERS
+from core.config import DEVICE_CHOICES, GENDERS, JOINT_NAMES
 from core.deform import LENGTH_MAX, LENGTH_MIN
 from core.fitting import init as fitting_init
 from core.head import HEAD_DEFAULTS, normalize_head_params
@@ -71,6 +72,7 @@ class ModelCache:
         self.segment_sequences = {}
         self.head_configs = {}
         self.displacements = {}
+        self.histories = {}
         self._sequence = 0
         self.geometry_cache = {}
 
@@ -157,30 +159,229 @@ class ModelCache:
     def _segments(self, gender: str):
         return self.segment_configs.setdefault(gender, {})
 
+    # ------------------------------------------------------------------
+    # undo timeline
+    # ------------------------------------------------------------------
+    def _snapshot_locked(self, gender: str):
+        import torch
+        pose = self.poses.get(gender)
+        orient = self.global_orients.get(gender)
+        displacement = self.displacements.get(gender)
+        return {
+            "segments": copy.deepcopy(self.segment_configs.get(gender, {})),
+            "sequences": dict(self.segment_sequences.get(gender, {})),
+            "head": copy.deepcopy(self.head_configs.get(gender, {})),
+            "displacement": None if displacement is None else displacement.copy(),
+            "pose": None if pose is None else pose.detach().clone(),
+            "orient": None if orient is None else orient.detach().clone(),
+        }
+
+    def _restore_locked(self, gender: str, snapshot):
+        if snapshot["segments"]:
+            self.segment_configs[gender] = copy.deepcopy(snapshot["segments"])
+        else:
+            self.segment_configs.pop(gender, None)
+        if snapshot["sequences"]:
+            self.segment_sequences[gender] = dict(snapshot["sequences"])
+        else:
+            self.segment_sequences.pop(gender, None)
+        if snapshot["head"]:
+            self.head_configs[gender] = copy.deepcopy(snapshot["head"])
+        else:
+            self.head_configs.pop(gender, None)
+        if snapshot["displacement"] is None:
+            self.displacements.pop(gender, None)
+        else:
+            self.displacements[gender] = snapshot["displacement"].copy()
+        if snapshot["pose"] is None:
+            self.poses.pop(gender, None)
+        else:
+            self.poses[gender] = snapshot["pose"].detach().clone()
+        if snapshot["orient"] is None:
+            self.global_orients.pop(gender, None)
+        else:
+            self.global_orients[gender] = snapshot["orient"].detach().clone()
+        self.outputs.pop(gender, None)
+        self._invalidate_geometry(gender)
+
+    def _same_snapshot(self, left, right) -> bool:
+        import torch
+        for key in ("segments", "sequences", "head"):
+            if left[key] != right[key]:
+                return False
+        left_displacement = left["displacement"]
+        right_displacement = right["displacement"]
+        if (left_displacement is None) != (right_displacement is None):
+            return False
+        if left_displacement is not None and not np.array_equal(
+            left_displacement, right_displacement
+        ):
+            return False
+        for key in ("pose", "orient"):
+            left_value = left[key]
+            right_value = right[key]
+            if (left_value is None) != (right_value is None):
+                return False
+            if left_value is not None and not bool(torch.equal(left_value, right_value)):
+                return False
+        return True
+
+    def _ensure_history_locked(self, gender: str):
+        if gender not in self.histories:
+            self.histories[gender] = {
+                "entries": [
+                    {
+                        "id": 0,
+                        "label": "初始状态",
+                        "snapshot": self._snapshot_locked(gender),
+                    }
+                ],
+                "cursor": 0,
+                "next_id": 1,
+            }
+        return self.histories[gender]
+
+    def _history_index_locked(self, history):
+        for index, entry in enumerate(history["entries"]):
+            if entry["id"] == history["cursor"]:
+                return index
+        history["cursor"] = history["entries"][-1]["id"]
+        return len(history["entries"]) - 1
+
+    def _history_state_locked(self, history):
+        index = self._history_index_locked(history)
+        return {
+            "entries": [
+                {"id": entry["id"], "label": entry["label"]}
+                for entry in history["entries"]
+            ],
+            "cursor": history["cursor"],
+            "can_undo": index > 0,
+            "can_redo": index < len(history["entries"]) - 1,
+        }
+
+    def _history_begin_locked(self, gender: str):
+        self._ensure_history_locked(gender)
+        return self._snapshot_locked(gender)
+
+    def _history_commit_locked(self, gender: str, label: str, base):
+        current = self._snapshot_locked(gender)
+        if self._same_snapshot(base, current):
+            return
+        history = self._ensure_history_locked(gender)
+        index = self._history_index_locked(history)
+        del history["entries"][index + 1:]
+        entry_id = history["next_id"]
+        history["next_id"] += 1
+        history["entries"].append(
+            {"id": entry_id, "label": label, "snapshot": current}
+        )
+        history["cursor"] = entry_id
+        limit = 60
+        if len(history["entries"]) > limit:
+            history["entries"] = history["entries"][-limit:]
+
+    def begin_edit(self, gender: str, label: str):
+        with self.lock:
+            return self._history_begin_locked(gender)
+
+    def commit_edit(self, gender: str, label: str, base):
+        with self.lock:
+            self._history_commit_locked(gender, label, base)
+
+    def rollback_edit(self, gender: str, base):
+        with self.lock:
+            self._restore_locked(gender, base)
+
+    def history_state(self, gender: str) -> dict:
+        with self.lock:
+            history = self._ensure_history_locked(gender)
+            return self._history_state_locked(history)
+
+    def undo(self, gender: str) -> dict:
+        with self.lock:
+            history = self._ensure_history_locked(gender)
+            index = self._history_index_locked(history)
+            if index <= 0:
+                return {
+                    "ok": False,
+                    "label": None,
+                    "history": self._history_state_locked(history),
+                }
+            entry = history["entries"][index - 1]
+            history["cursor"] = entry["id"]
+            self._restore_locked(gender, entry["snapshot"])
+            return {
+                "ok": True,
+                "label": entry["label"],
+                "history": self._history_state_locked(history),
+            }
+
+    def jump_history(self, gender: str, entry_id: int) -> dict:
+        with self.lock:
+            history = self._ensure_history_locked(gender)
+            entry = next(
+                (item for item in history["entries"] if item["id"] == int(entry_id)),
+                None,
+            )
+            if entry is None:
+                raise ValueError("history entry not found")
+            history["cursor"] = entry["id"]
+            self._restore_locked(gender, entry["snapshot"])
+            return {
+                "ok": True,
+                "label": entry["label"],
+                "history": self._history_state_locked(history),
+            }
+
+    def _segment_label(self, gender: str, child: int, symmetric: bool = False,
+                       reset: bool = False) -> str:
+        parents = self._model(gender).parents.cpu().numpy()
+        parent = int(parents[child])
+        name = f"{JOINT_NAMES[parent]}→{JOINT_NAMES[child]}"
+        if symmetric and child in (1, 2, 4, 5, 7, 8, 10, 11, 13, 14, 16, 17, 18, 19, 20, 21):
+            name = f"对称 {name}"
+        return ("重置骨段 " if reset else "骨段 ") + name
+
+    def _pose_label(self, gender: str, joint: int, symmetric: bool) -> str:
+        name = JOINT_NAMES[joint] if 0 <= joint < len(JOINT_NAMES) else str(joint)
+        return ("对称姿态 " if symmetric else "姿态 ") + name
+
     def head(self, gender: str) -> dict:
         values = dict(HEAD_DEFAULTS)
         values.update(self.head_configs.get(gender, {}))
         return values
 
-    def update_head(self, gender: str, params: dict):
+    def update_head(self, gender: str, params: dict, record: bool = True):
         if gender not in GENDERS or not self.available(gender):
             raise FileNotFoundError(gender)
         values = normalize_head_params(params)
         with self.lock:
-            self.head_configs[gender] = values
-            self._invalidate_geometry(gender)
+            base = self._history_begin_locked(gender) if record else None
+            try:
+                self.head_configs[gender] = values
+                self._invalidate_geometry(gender)
+            except Exception:
+                if record:
+                    self._restore_locked(gender, base)
+                raise
+            if record:
+                self._history_commit_locked(gender, "头部编辑", base)
 
-    def reset_head(self, gender: str):
+    def reset_head(self, gender: str, record: bool = True):
         if gender not in GENDERS or not self.available(gender):
             raise FileNotFoundError(gender)
         with self.lock:
+            base = self._history_begin_locked(gender) if record else None
             self.head_configs.pop(gender, None)
             self._invalidate_geometry(gender)
+            if record:
+                self._history_commit_locked(gender, "重置头部", base)
 
     def displacement(self, gender: str):
         return self.displacements.get(gender)
 
-    def update_displacement(self, gender: str, values):
+    def update_displacement(self, gender: str, values, record: bool = True):
         if gender not in GENDERS or not self.available(gender):
             raise FileNotFoundError(gender)
         array = np.asarray(values, dtype=np.float32)
@@ -194,15 +395,21 @@ class ModelCache:
         if float(np.abs(array).max()) > 0.5:
             raise ValueError("displacement magnitude is implausibly large (>0.5 m)")
         with self.lock:
+            base = self._history_begin_locked(gender) if record else None
             self.displacements[gender] = array.copy()
             self._invalidate_geometry(gender)
+            if record:
+                self._history_commit_locked(gender, "导入位移", base)
 
-    def reset_displacement(self, gender: str):
+    def reset_displacement(self, gender: str, record: bool = True):
         if gender not in GENDERS or not self.available(gender):
             raise FileNotFoundError(gender)
         with self.lock:
+            base = self._history_begin_locked(gender) if record else None
             self.displacements.pop(gender, None)
             self._invalidate_geometry(gender)
+            if record:
+                self._history_commit_locked(gender, "清除位移", base)
 
     def _sync_joint_girth(self, gender: str, joint: int, value: float, parents):
         """Give every bone incident to ``joint`` the same endpoint girth.
@@ -278,7 +485,8 @@ class ModelCache:
         self._invalidate_geometry(gender)
 
     def update_segment(self, gender: str, child: int, length: float,
-                       radii: list[float], symmetric: bool = False):
+                       radii: list[float], symmetric: bool = False,
+                       record: bool = True):
         if gender not in GENDERS or not self.available(gender):
             raise FileNotFoundError(gender)
         if child < 1 or child > 21:
@@ -296,11 +504,21 @@ class ModelCache:
             )
         targets = segment_targets(child, symmetric)
         with self.lock:
-            for target in targets:
-                self._apply_update_segment_locked(gender, target, length, radii)
+            base = self._history_begin_locked(gender) if record else None
+            try:
+                for target in targets:
+                    self._apply_update_segment_locked(gender, target, length, radii)
+            except Exception:
+                if record:
+                    self._restore_locked(gender, base)
+                raise
+            if record:
+                self._history_commit_locked(
+                    gender, self._segment_label(gender, child, symmetric), base
+                )
 
     def reset_segment(self, gender: str, child: int, keep_length: bool = False,
-                      symmetric: bool = False):
+                      symmetric: bool = False, record: bool = True):
         """Reset a segment.
 
         ``keep_length=False`` restores both the bone length and the cross-section
@@ -315,25 +533,36 @@ class ModelCache:
             raise ValueError("Invalid body segment")
         targets = segment_targets(child, symmetric)
         with self.lock:
-            parents = self._model(gender).parents.cpu().numpy()
-            for target in targets:
-                entry = self._segments(gender).get(str(target))
-                if keep_length and entry is not None:
-                    entry["radii"] = [1.0, 1.0, 1.0]
-                    # A reset cross-section is a real edit of the shared joints,
-                    # unlike deleting the entry (where an adjacent bone may still
-                    # own the joint value).
-                    self._sync_joint_girth(gender, int(parents[target]), 1.0, parents)
-                    self._sync_joint_girth(gender, target, 1.0, parents)
-                else:
-                    self._segments(gender).pop(str(target), None)
-                    self.segment_sequences.get(gender, {}).pop(str(target), None)
-                self._invalidate_geometry(gender)
+            base = self._history_begin_locked(gender) if record else None
+            try:
+                parents = self._model(gender).parents.cpu().numpy()
+                for target in targets:
+                    entry = self._segments(gender).get(str(target))
+                    if keep_length and entry is not None:
+                        entry["radii"] = [1.0, 1.0, 1.0]
+                        # A reset cross-section is a real edit of the shared
+                        # joints, unlike deleting the entry (where an adjacent
+                        # bone may still own the joint value).
+                        self._sync_joint_girth(gender, int(parents[target]), 1.0, parents)
+                        self._sync_joint_girth(gender, target, 1.0, parents)
+                    else:
+                        self._segments(gender).pop(str(target), None)
+                        self.segment_sequences.get(gender, {}).pop(str(target), None)
+                    self._invalidate_geometry(gender)
+            except Exception:
+                if record:
+                    self._restore_locked(gender, base)
+                raise
+            if record:
+                self._history_commit_locked(
+                    gender, self._segment_label(gender, child, symmetric, reset=True), base
+                )
 
-    def reset(self, gender: str):
+    def reset(self, gender: str, record: bool = True):
         if gender not in GENDERS or not self.available(gender):
             raise FileNotFoundError(gender)
         with self.lock:
+            base = self._history_begin_locked(gender) if record else None
             model = self._model(gender)
             import torch
             self.poses[gender] = torch.zeros(
@@ -346,15 +575,19 @@ class ModelCache:
             self.displacements.pop(gender, None)
             self.outputs.pop(gender, None)
             self._invalidate_geometry(gender)
+            if record:
+                self._history_commit_locked(gender, "重置", base)
 
     def pose_joint(self, gender: str, joint: int, target: list[float], full_body: bool,
-                   iterations: int | None = None, symmetric: bool = False):
+                   iterations: int | None = None, symmetric: bool = False,
+                   record: bool = True):
         if gender not in GENDERS or not self.available(gender):
             raise FileNotFoundError(gender)
         if joint < 1 or joint > 21:
             raise ValueError("Only body joints 1-21 are editable in this version")
         import torch
         with self.lock:
+            history_base = self._history_begin_locked(gender) if record else None
             model = self._model(gender)
             base = self._pose(gender, model).clone()
             parents = model.parents.cpu().tolist()
@@ -434,6 +667,10 @@ class ModelCache:
                     body_pose=self.poses[gender], global_orient=global_orient
                 )
             self._invalidate_geometry(gender)
+            if record:
+                self._history_commit_locked(
+                    gender, self._pose_label(gender, joint, symmetric), history_base
+                )
 
     # ------------------------------------------------------------------
     # Delegates to core.geometry / core.export / core.detector / core.fitting

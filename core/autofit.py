@@ -363,7 +363,7 @@ def _apply_torso_girth(cache, gender: str, girth: float):
     for child in (3, 6, 9):
         entry = config.get(str(child), {})
         length = float(entry.get("length", 1.0))
-        cache.update_segment(gender, child, length, [girth, girth])
+        cache.update_segment(gender, child, length, [girth, girth], record=False)
         applied[str(child)] = float(girth)
     return applied
 
@@ -373,19 +373,27 @@ def run(cache, gender: str, *, data: bytes | None = None,
     if gender not in GENDERS or not cache.available(gender):
         raise FileNotFoundError(gender)
     images, source = _collect_images(data, filename, path)
-
-    # Start from the canonical rest identity; auto-fit replaces the previous
-    # coarse edit rather than compounding it.
-    cache.reset(gender)
-    model, base_vertices, _joints, _parents = cache.rest_geometry(gender)
-    model_height = float(base_vertices[:, 1].max() - base_vertices[:, 1].min())
-
     candidates = _split_candidates(cache, images)
     front, side = _pick_views(candidates)
-    front_fit = _fit_front(cache, gender, front, model_height)
-    side_fit = _fit_side(cache, gender, side, model_height, front_fit["bbox"][3]) if side else None
-    girth = _apply_torso_girth(cache, gender, side_fit["torso_girth"]) if side_fit else {}
-    cache._invalidate_geometry(gender)
+
+    # Auto-fit is one undoable operation even though it writes reset + lengths +
+    # girth internally.
+    history_base = cache.begin_edit(gender, "Auto-fit v0")
+    try:
+        # Start from the canonical rest identity; auto-fit replaces the previous
+        # coarse edit rather than compounding it.
+        cache.reset(gender, record=False)
+        model, base_vertices, _joints, _parents = cache.rest_geometry(gender)
+        model_height = float(base_vertices[:, 1].max() - base_vertices[:, 1].min())
+
+        front_fit = _fit_front(cache, gender, front, model_height)
+        side_fit = _fit_side(cache, gender, side, model_height, front_fit["bbox"][3]) if side else None
+        girth = _apply_torso_girth(cache, gender, side_fit["torso_girth"]) if side_fit else {}
+        cache._invalidate_geometry(gender)
+    except Exception:
+        cache.rollback_edit(gender, history_base)
+        raise
+    cache.commit_edit(gender, "Auto-fit v0", history_base)
 
     warnings = []
     if side is None:
