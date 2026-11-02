@@ -78,7 +78,7 @@
   <details class="panel"><summary class="section-title">导出</summary><div class="segment-tools export-buttons"><button id="export-glb" class="small" title="下载带 55 关节蒙皮的 T-pose GLB">GLB</button><button id="export-params" class="small" title="下载 identity 参数 JSON">参数</button><button id="export-fourview" class="small" title="下载四视图 PNG + views.json">四视图</button></div><div class="segment-tools export-buttons"><button id="disp-pick" class="small" title="导入 Blender shape key 导出的 (N,3) .npy">导入位移</button><button id="disp-clear" class="small" disabled title="移除已导入的位移">清除位移</button></div><input id="disp-file" type="file" accept=".npy,application/octet-stream"><p class="sub">GLB 带 55 关节蒙皮（Blender 会得到 Armature + Vertex Groups）；四视图为剪影 + 眼睛位置；导出始终是 T-pose identity，不包含当前摆姿。位移会应用到 GLB/四视图。</p></details>
   <div id="status">正在读取模型信息...</div>
 </aside><main><canvas id="viewer"></canvas><div class="floating-tools" role="toolbar" aria-label="编辑工具"><button id="symmetry-toggle" class="tool-btn" aria-pressed="false" title="对称编辑">对称</button><button id="undo-btn" class="tool-btn" title="撤回 (Ctrl+Z)" disabled>撤回</button></div><div class="hud">点击黄色身体关节后拖动<br>空白处拖动旋转 · 滚轮缩放</div><div id="toasts"></div></main></div>
-<div id="history-drawer" class="history-drawer" aria-hidden="true"><button id="history-tab" class="history-tab" aria-expanded="false">历史</button><aside class="history-panel"><div class="history-head"><strong>操作历史</strong><button id="history-close" class="small">关闭</button></div><p class="history-hint">双击任意一步回撤/重做</p><ol id="history-list" class="history-list"></ol></aside></div>
+<div id="history-drawer" class="history-drawer" aria-hidden="true"><button id="history-tab" class="history-tab" aria-expanded="false">历史</button><aside class="history-panel"><div class="history-head"><strong>操作历史</strong><button id="history-close" class="small">关闭</button></div><p class="history-hint">单击任意一步回撤/重做</p><ol id="history-list" class="history-list"></ol></aside></div>
 <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"}}</script>
 <script type="module">
 import * as THREE from 'three';
@@ -681,10 +681,10 @@ function renderHistory(history){
     const item=document.createElement('li');
     item.textContent=(index+1)+'. '+entry.label;
     item.dataset.id=String(entry.id);
-    item.title='双击回到这一步';
+    item.title='单击回到这一步';
     if(entry.id===currentId)item.classList.add('current');
     else if(index>currentIndex)item.classList.add('future');
-    item.addEventListener('dblclick',()=>jumpHistory(entry.id));
+    item.addEventListener('click',()=>jumpHistory(entry.id));
     list.appendChild(item);
   });
   if(undo){
