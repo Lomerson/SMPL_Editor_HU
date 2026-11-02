@@ -25,6 +25,25 @@
   button:disabled { color:#697383; cursor:not-allowed; } #status { margin-top:auto; color:#aeb7c6; font-size:12px; line-height:1.55; }
   main { min-width:0; min-height:0; position:relative; } canvas { display:block; width:100%; height:100%; }
   .hud { position:absolute; top:18px; right:18px; background:#1a1e25e8; border:1px solid #343b47; border-radius:6px; padding:11px 13px; color:#b9c2d0; font-size:12px; line-height:1.55; }
+  .floating-tools { position:absolute; left:14px; top:18px; z-index:30; display:flex; gap:8px; }
+  .tool-btn { width:42px; height:42px; border-radius:12px; border:1px solid #414957; background:#1a1e25e8; color:#eff2f7; padding:0; font-size:12px; line-height:1; text-align:center; cursor:pointer; backdrop-filter:blur(6px); }
+  .tool-btn:hover { border-color:#7da6ef; background:#293544; }
+  .tool-btn.active { background:#24559a; border-color:#70a5f3; color:#fff; }
+  .tool-btn:disabled { opacity:.45; cursor:not-allowed; }
+  .history-drawer { position:fixed; right:0; top:0; height:100%; z-index:45; pointer-events:none; }
+  .history-panel { pointer-events:auto; position:absolute; right:0; top:0; width:280px; height:100%; box-sizing:border-box; padding:18px 14px; background:#171b22f5; border-left:1px solid #303642; overflow-y:auto; transform:translateX(100%); transition:transform .2s ease; }
+  .history-drawer.open .history-panel { transform:translateX(0); }
+  .history-tab { pointer-events:auto; position:absolute; right:0; top:50%; transform:translateY(-50%); width:34px; padding:14px 0; border-radius:12px 0 0 12px; border:1px solid #414957; border-right:0; background:#1a1e25f2; color:#eff2f7; font-size:12px; writing-mode:vertical-rl; letter-spacing:2px; cursor:pointer; transition:right .2s ease; }
+  .history-drawer.open .history-tab { right:280px; }
+  .history-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+  .history-head .small { min-height:28px; padding:0 8px; font-size:12px; }
+  .history-hint { color:#8f99a9; font-size:11px; margin:8px 0 10px; }
+  .history-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:4px; }
+  .history-list li { padding:7px 8px; border-radius:6px; border:1px solid transparent; color:#c7d0dd; font-size:12px; line-height:1.4; cursor:default; user-select:none; }
+  .history-list li.future { color:#7f8a9b; }
+  .history-list li.current { color:#fff; background:#24559a; border-color:#70a5f3; }
+  .history-list li:hover { border-color:#414957; }
+  #history-list li { cursor:pointer; }
   .pose-controls { display:flex; gap:8px; align-items:stretch; } .toggle { display:flex; align-items:center; gap:7px; min-height:38px; flex:1; padding:0 10px; border:1px solid #414957; border-radius:6px; background:#252b35; font-size:14px; cursor:pointer; white-space:nowrap; } .toggle input { width:16px; height:16px; accent-color:#70a5f3; } #reset { min-height:38px; padding:0 10px; font-size:13px; white-space:nowrap; }
   .segment-empty { color:#8f99a9; font-size:13px; } .segment-name { color:#d9e5f8; font-size:13px; margin:0 0 10px; } .field { display:grid; grid-template-columns:62px minmax(0,1fr) 48px; gap:7px; align-items:center; margin:8px 0; font-size:12px; color:#b9c3d0; } input[type=range] { width:100%; accent-color:#70a5f3; } .value { color:#f1f4f8; text-align:right; font-variant-numeric:tabular-nums; } .segment-tools { display:flex; gap:8px; align-items:center; margin:10px 0 4px; } .segment-tools select { flex:1; min-height:34px; font-size:13px; } .small { min-height:34px; padding:0 10px; font-size:12px; } .selected-bone { color:#fff1b3; }
   .error { color:#ffabb8 !important; }
@@ -53,10 +72,13 @@
   <details class="panel" open><summary class="section-title">骨段编辑</summary><div id="segment-editor" class="segment-empty">点击一条黄色骨骼连线以编辑该骨段。</div></details>
   <details class="panel" open><summary class="section-title">头部编辑</summary><div id="head-editor" class="segment-empty">正在读取头部参数...</div></details>
   <details class="panel" open><summary class="section-title">Auto-fit v0</summary><div class="ref-row"><button id="fit-pick">选择图片/压缩包</button><button id="fit-run" class="small" disabled>开始拟合</button></div><input id="fit-file" type="file" accept="image/*,.zip,.tar,.tgz,.gz"><p class="sub" id="fit-info">支持：单张正+侧组合图 / 目录路径 / zip / tar.gz / tgz / 单张正视图。文件名不用于判断正/侧。</p><div class="ref-row"><input id="fit-path" value="/home/lomerson/MyProjects/ui" aria-label="服务器图片/目录/压缩包路径"><button id="fit-path-run" class="small">按路径拟合</button></div></details>
+  <!-- 参考图自动对齐已停用，代码保留供 auto-fit 后续参考。
   <details class="panel" open><summary class="section-title">参考图</summary><div class="ref-row"><button id="ref-pick">选择图片</button><button id="ref-hide" class="small" disabled>隐藏</button><button id="ref-clear" class="small" disabled>移除</button></div><input id="ref-file" type="file" accept="image/png,image/jpeg,image/jpg,image/webp,image/bmp,image/gif,image/tiff,image/*"><p class="sub ref-info" id="ref-info">未选择图片。上传后自动用 AnimePoseDetector 对齐双眼。</p></details>
+  -->
   <details class="panel"><summary class="section-title">导出</summary><div class="segment-tools export-buttons"><button id="export-glb" class="small" title="下载带 55 关节蒙皮的 T-pose GLB">GLB</button><button id="export-params" class="small" title="下载 identity 参数 JSON">参数</button><button id="export-fourview" class="small" title="下载四视图 PNG + views.json">四视图</button></div><div class="segment-tools export-buttons"><button id="disp-pick" class="small" title="导入 Blender shape key 导出的 (N,3) .npy">导入位移</button><button id="disp-clear" class="small" disabled title="移除已导入的位移">清除位移</button></div><input id="disp-file" type="file" accept=".npy,application/octet-stream"><p class="sub">GLB 带 55 关节蒙皮（Blender 会得到 Armature + Vertex Groups）；四视图为剪影 + 眼睛位置；导出始终是 T-pose identity，不包含当前摆姿。位移会应用到 GLB/四视图。</p></details>
   <div id="status">正在读取模型信息...</div>
-</aside><main><canvas id="viewer"></canvas><div class="hud">点击黄色身体关节后拖动<br>空白处拖动旋转 · 滚轮缩放</div><div id="toasts"></div></main></div>
+</aside><main><canvas id="viewer"></canvas><div class="floating-tools" role="toolbar" aria-label="编辑工具"><button id="symmetry-toggle" class="tool-btn" aria-pressed="false" title="对称编辑">对称</button><button id="undo-btn" class="tool-btn" title="撤回 (Ctrl+Z)" disabled>撤回</button></div><div class="hud">点击黄色身体关节后拖动<br>空白处拖动旋转 · 滚轮缩放</div><div id="toasts"></div></main></div>
+<div id="history-drawer" class="history-drawer" aria-hidden="true"><button id="history-tab" class="history-tab" aria-expanded="false">历史</button><aside class="history-panel"><div class="history-head"><strong>操作历史</strong><button id="history-close" class="small">关闭</button></div><p class="history-hint">双击任意一步回撤/重做</p><ol id="history-list" class="history-list"></ol></aside></div>
 <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"}}</script>
 <script type="module">
 import * as THREE from 'three';
@@ -69,6 +91,8 @@ scene.add(new THREE.HemisphereLight(0xddeaff,0x20242c,2.0)); const key=new THREE
 const grid=new THREE.GridHelper(8,16,0x4a596f,0x27303b); scene.add(grid); const axes=new THREE.AxesHelper(.45); axes.position.set(-2.5,.01,2.5); scene.add(axes);
 let meshRoot=null, skeletonRoot=null, selected=null, jointPickers=[], segmentLines=null, skeletonData=null, drag=null, selectedSegment=null, revision=0;
 let skinOpacityLevel=1;
+let symmetric=false;
+let undoBusy=false;
 const MESH_OPACITY=0.42;
 const raycaster=new THREE.Raycaster(), pointer=new THREE.Vector2(), dragPlane=new THREE.Plane();
 function resize(){const r=canvas.getBoundingClientRect();renderer.setSize(r.width,r.height,false);camera.aspect=r.width/r.height;camera.updateProjectionMatrix()} addEventListener('resize',resize); resize();
@@ -251,10 +275,10 @@ async function showReferenceFile(file){
     referenceEpoch=0;
     referenceSolvedKey=null;      // a new picture must always be solved again
     referenceSolveInfo=null;
-    realignReference();
-    setReferenceLock(true);
-    setStatus('已载入参考图并对齐双眼（joint 23/24）');
-    maybeSolveReference();          // fit the bone lengths to the picture's joints
+    // realignReference();          // legacy reference auto-alignment disabled
+    setStatus('参考图自动对齐已停用（旧功能保留代码）');
+    // setReferenceLock(true);
+    // maybeSolveReference();
   }else{
     referenceLayout=null;
     const box=new THREE.Box3().setFromObject(meshRoot||scene), centre=box.getCenter(new THREE.Vector3());
@@ -350,7 +374,7 @@ function segmentEditor(){
     const keepLength=referenceLocked;
     setStatus(keepLength?'正在重置横截面（保留对齐长度）...':'正在重置当前骨段...');
     try{
-      const response=await fetch('/api/segment/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,child,keep_length:keepLength})});
+      const response=await fetch('/api/segment/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,child,keep_length:keepLength,symmetric})});
       if(!response.ok)throw Error(await response.text());
       const result=await response.json();
       if(!result.ok)throw Error('骨段重置未完成');
@@ -362,7 +386,7 @@ function segmentEditor(){
   };
   updateSelectionVisuals();
 }
-async function applySegment(child,length,radii){setStatus('正在更新骨段 Mesh...');try{const r=await fetch('/api/segment',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,child,length,radii})});if(!r.ok)throw Error(await r.text());await load(selected,true,true);selectedSegment=child;segmentEditor()}catch(e){setStatus('骨段更新失败：'+e.message,true)}}
+async function applySegment(child,length,radii){setStatus('正在更新骨段 Mesh...');try{const r=await fetch('/api/segment',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,child,length,radii,symmetric})});if(!r.ok)throw Error(await r.text());await load(selected,true,true);selectedSegment=child;segmentEditor()}catch(e){setStatus('骨段更新失败：'+e.message,true)}}
 // ---------------------------- head editor --------------------------------
 const HEAD_KEYS=['head_length','head_width','head_depth','jaw','eye'];
 const HEAD_FALLBACK_RANGES={
@@ -535,7 +559,8 @@ function addSkeleton(data,groundOffsetY){
   scene.add(skeletonRoot);
   segmentEditor();
   renderHeadEditor();
-  realignReference();
+  // realignReference();  // legacy reference auto-alignment disabled
+
 }
 // OBJLoader expands a mesh into one vertex per triangle corner (3 x 20908 =
 // 62724 vertices), which breaks the 1:1 mapping onto the 10475 SMPL-X skinning
@@ -640,6 +665,70 @@ async function importDisplacement(file){
     setStatus('已导入位移：'+file.name+'（应用到 rest mesh / GLB / 四视图）');
   }catch(error){setStatus('位移导入失败：'+error.message,true);}
 }
+function renderHistory(history){
+  const list=document.querySelector('#history-list');
+  const undo=document.querySelector('#undo-btn');
+  if(!list)return;
+  list.innerHTML='';
+  if(!history||!history.entries||!history.entries.length){
+    if(undo)undo.disabled=true;
+    return;
+  }
+  const currentId=history.cursor;
+  let currentIndex=-1;
+  history.entries.forEach((entry,index)=>{if(entry.id===currentId)currentIndex=index;});
+  history.entries.forEach((entry,index)=>{
+    const item=document.createElement('li');
+    item.textContent=(index+1)+'. '+entry.label;
+    item.dataset.id=String(entry.id);
+    item.title='双击回到这一步';
+    if(entry.id===currentId)item.classList.add('current');
+    else if(index>currentIndex)item.classList.add('future');
+    item.addEventListener('dblclick',()=>jumpHistory(entry.id));
+    list.appendChild(item);
+  });
+  if(undo){
+    undo.disabled=!history.can_undo;
+    const previous=currentIndex>0?history.entries[currentIndex-1]:null;
+    undo.title=history.can_undo&&previous?'撤回：'+previous.label:'没有可撤回的操作';
+  }
+}
+async function undoLast(){
+  if(!selected||undoBusy)return;
+  undoBusy=true;
+  try{
+    const response=await fetch('/api/undo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected})});
+    if(!response.ok)throw Error(await response.text());
+    const data=await response.json();
+    if(!data.ok){renderHistory(data.history);setStatus('没有可撤回的操作');return;}
+    selectedSegment=null;
+    await load(selected,true,true);
+    setStatus('已撤回：'+data.label);
+  }catch(error){setStatus('撤回失败：'+error.message,true);}
+  finally{undoBusy=false;}
+}
+async function jumpHistory(entryId){
+  if(!selected||undoBusy)return;
+  undoBusy=true;
+  try{
+    const response=await fetch('/api/history/jump',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,id:entryId})});
+    if(!response.ok)throw Error(await response.text());
+    const data=await response.json();
+    selectedSegment=null;
+    await load(selected,true,true);
+    setStatus('已回到：'+data.label);
+  }catch(error){setStatus('历史跳转失败：'+error.message,true);}
+  finally{undoBusy=false;}
+}
+function setSymmetric(value){
+  symmetric=!!value;
+  const button=document.querySelector('#symmetry-toggle');
+  if(button){
+    button.classList.toggle('active',symmetric);
+    button.setAttribute('aria-pressed',symmetric?'true':'false');
+  }
+  setStatus(symmetric?'对称编辑已开启（头/颈/脊椎除外）':'对称编辑已关闭');
+}
 async function load(gender,edited=false,force=false){
   if(selected===gender&&!force)return;
   const shouldFrame=selected!==gender||!meshRoot;
@@ -661,12 +750,13 @@ async function load(gender,edited=false,force=false){
     paintMesh();
     addSkeleton(skeleton,groundOffset);
     updateDisplacementButtons(!!skeleton.has_displacement);
+    renderHistory(skeleton.history);
     ensureOwners(gender);
     if(shouldFrame)frame(obj);
     applySkinOpacity();
     document.querySelector('#reset').disabled=false;
-    setStatus(referenceLocked?'已加载 '+gender+'（骨架已锁定，移除图片后可编辑）':'已加载 '+gender+'，可拖动黄色身体关节');
-    maybeSolveReference();
+    setStatus('已加载 '+gender+'，可拖动黄色身体关节');
+    // maybeSolveReference();  // legacy reference auto-alignment disabled
   }catch(e){setStatus('加载失败：'+e.message,true);}
 }
 function updatePointer(event){const r=canvas.getBoundingClientRect();pointer.set((event.clientX-r.left)/r.width*2-1,-((event.clientY-r.top)/r.height)*2+1);raycaster.setFromCamera(pointer,camera)}
@@ -723,7 +813,7 @@ canvas.addEventListener('pointerup',async (event)=>{
     const fullBody=document.querySelector('#full-body-ik').checked;
     setStatus('正在求解 '+(fullBody?'全身 IK...':'局部旋转...'));
     try{
-      const r=await fetch('/api/pose',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,joint:moved.joint,target:moved.dot.position.toArray(),full_body:fullBody})});
+      const r=await fetch('/api/pose',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,joint:moved.joint,target:moved.dot.position.toArray(),full_body:fullBody,symmetric})});
       if(!r.ok)throw Error(await r.text());
       await r.json();
       clearSegmentSelection();
@@ -740,6 +830,8 @@ canvas.addEventListener('pointerup',async (event)=>{
   if(finished&&!finished.moved&&!finished.boneHit&&!finished.joint)clearSegmentSelection();
 });
 document.querySelector('#reset').onclick=async()=>{if(!selected)return;if(referenceLocked){warnLocked();return;}const button=document.querySelector('#reset');button.disabled=true;setStatus('正在重置当前姿态...');try{const response=await fetch('/api/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected})});if(!response.ok)throw Error(await response.text());const result=await response.json();if(!result.ok)throw Error('重置未完成');selectedSegment=null;await load(selected,true,true);setStatus('已重置为默认 SMPL-X 姿态');}catch(error){setStatus('重置失败：'+error.message,true);button.disabled=false;}};
+/* Legacy reference upload/auto-alignment is intentionally disabled.
+   The implementation is kept for a future auto-fit reference.
 const refInput=document.querySelector('#ref-file'), refPick=document.querySelector('#ref-pick'), refClear=document.querySelector('#ref-clear'), refHide=document.querySelector('#ref-hide');
 refPick.onclick=()=>refInput.click();
 refInput.onchange=()=>{const file=refInput.files&&refInput.files[0];refInput.value='';if(file)showReferenceFile(file);};
@@ -752,6 +844,7 @@ refHide.onclick=()=>{
   setStatus(referenceHidden?'参考图已隐藏':'参考图已显示');
 };
 refClear.onclick=()=>{clearReference();setStatus('已移除参考图');};
+*/
 const exportGlb=document.querySelector('#export-glb'), exportParams=document.querySelector('#export-params'), exportFourview=document.querySelector('#export-fourview');
 exportGlb.onclick=()=>{if(!selected)return;setStatus('正在导出 T-pose GLB（含 55 关节蒙皮）...');window.location.href='/api/export/glb/'+selected;};
 exportParams.onclick=()=>{if(!selected)return;setStatus('正在导出 identity 参数 JSON...');window.location.href='/api/export/params/'+selected;};
@@ -765,6 +858,29 @@ fitPick.onclick=()=>fitFileInput.click();
 fitFileInput.onchange=()=>{const file=fitFileInput.files&&fitFileInput.files[0];fitFileInput.value='';if(!file)return;autofitFile=file;fitRun.disabled=false;document.querySelector('#fit-info').textContent='已选择 '+file.name+'，点击「开始拟合」';};
 fitRun.onclick=()=>runAutofit('file');
 fitPathRun.onclick=()=>runAutofit('path');
+const symmetryToggle=document.querySelector('#symmetry-toggle');
+if(symmetryToggle)symmetryToggle.onclick=()=>setSymmetric(!symmetric);
+const undoBtn=document.querySelector('#undo-btn');
+if(undoBtn)undoBtn.onclick=undoLast;
+const historyDrawer=document.querySelector('#history-drawer'), historyTab=document.querySelector('#history-tab'), historyClose=document.querySelector('#history-close');
+function setHistoryOpen(open){
+  if(!historyDrawer)return;
+  historyDrawer.classList.toggle('open',open);
+  historyDrawer.setAttribute('aria-hidden',open?'false':'true');
+  if(historyTab)historyTab.setAttribute('aria-expanded',open?'true':'false');
+}
+if(historyTab)historyTab.onclick=()=>setHistoryOpen(!historyDrawer.classList.contains('open'));
+if(historyClose)historyClose.onclick=()=>setHistoryOpen(false);
+addEventListener('keydown',(event)=>{
+  if(!(event.ctrlKey||event.metaKey)||event.shiftKey||event.altKey)return;
+  if((event.key||'').toLowerCase()!=='z')return;
+  const target=event.target;
+  const tag=target&&target.tagName;
+  const textLike=target&&(target.isContentEditable||tag==='TEXTAREA'||tag==='SELECT'||(tag==='INPUT'&&!['range','button','checkbox','file'].includes(target.type)));
+  if(textLike)return;
+  event.preventDefault();
+  undoLast();
+});
 async function init(){renderSkinOpacity();const r=await fetch('/api/models');if(!r.ok)throw Error('无法读取模型信息');const data=await r.json();for(const item of data.models){const option=document.createElement('option');option.value=item.gender;option.textContent=item.label+(item.available?'':'（未安装）');option.disabled=!item.available;choices.append(option)}choices.onchange=()=>load(choices.value,true);const first=data.models.find(x=>x.available);if(first)load(first.gender,true);else setStatus('未找到可用 SMPL-X 模型文件',true)}
 init().catch(e=>setStatus(e.message,true));
 </script></body></html>

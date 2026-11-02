@@ -252,9 +252,9 @@ def handler_factory(cache: ModelCache):
 
         def do_POST(self):
             path = urlparse(self.path).path
-            if path == "/api/reference":
-                self._handle_reference()
-                return
+#             if path == "/api/reference":
+#                 self._handle_reference()
+#                 return
             if path.startswith("/api/autofit/upload/"):
                 self._handle_autofit_upload(path.rsplit("/", 1)[-1])
                 return
@@ -336,17 +336,17 @@ def handler_factory(cache: ModelCache):
                     )
                     self.send_json({"ok": True})
                     return
-                if path == "/api/reference/solve":
-                    override = data.get("full_body")
-                    result = cache.align_reference(
-                        gender,
-                        float(data["pixels_per_meter"]),
-                        [float(v) for v in data["eye_midpoint"]],
-                        {str(k): [float(a), float(b)] for k, (a, b) in data["joints"].items()},
-                        full_body=None if override is None else bool(override),
-                    )
-                    self.send_json(result)
-                    return
+#                 if path == "/api/reference/solve":
+#                     override = data.get("full_body")
+#                     result = cache.align_reference(
+#                         gender,
+#                         float(data["pixels_per_meter"]),
+#                         [float(v) for v in data["eye_midpoint"]],
+#                         {str(k): [float(a), float(b)] for k, (a, b) in data["joints"].items()},
+#                         full_body=None if override is None else bool(override),
+#                     )
+#                     self.send_json(result)
+#                     return
                 self.send_error(HTTPStatus.NOT_FOUND)
             except FileNotFoundError:
                 self.send_error(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
