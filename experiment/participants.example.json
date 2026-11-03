@@ -1,0 +1,9 @@
+{
+  "users": [
+    {
+      "username": "u_example",
+      "token": "REPLACE_WITH_A_LONG_RANDOM_ACCESS_TOKEN",
+      "label": "P01"
+    }
+  ]
+}

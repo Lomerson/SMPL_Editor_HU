@@ -580,6 +580,24 @@ class ModelCache:
             if record:
                 self._history_commit_locked(gender, "重置", base)
 
+    def reset_session_state(self):
+        """Clear every gender's identity/history for a new participant.
+
+        Unlike :meth:`reset` this is not a history entry: the next participant
+        must not be able to undo back into the previous participant's edits.
+        """
+        with self.lock:
+            for gender in GENDERS:
+                self.poses.pop(gender, None)
+                self.global_orients.pop(gender, None)
+                self.segment_configs.pop(gender, None)
+                self.segment_sequences.pop(gender, None)
+                self.head_configs.pop(gender, None)
+                self.displacements.pop(gender, None)
+                self.histories.pop(gender, None)
+                self.outputs.pop(gender, None)
+                self.geometry_cache.pop(gender, None)
+
     def pose_joint(self, gender: str, joint: int, target: list[float], full_body: bool,
                    iterations: int | None = None, symmetric: bool = False,
                    record: bool = True):

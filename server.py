@@ -13,35 +13,116 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from core import autofit
+from core.access import AccessController
 from core.config import DEVICE_CHOICES, GENDERS
 from core.model import ModelCache, resolve_device
 
-HTML = (Path(__file__).resolve().parent / "web" / "index.html").read_text(encoding="utf-8")
+WEB_ROOT = (Path(__file__).resolve().parent / "web").resolve()
+HTML = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
+EXPERIMENT_HTML = HTML.replace(
+    "</head>",
+    '<script>window.__SMPLX_EXPERIMENT__=true;</script></head>',
+)
+VENDOR_ROOT = (WEB_ROOT / "vendor").resolve()
 
-def handler_factory(cache: ModelCache):
+def handler_factory(cache: ModelCache, access: AccessController | None = None):
+    access = access or AccessController.disabled()
+
     class Handler(SimpleHTTPRequestHandler):
         def log_message(self, *_args):
             return
 
-        def send_json(self, payload, status=HTTPStatus.OK):
+        def send_json(self, payload, status=HTTPStatus.OK, headers=None):
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Cache-Control", "no-store, max-age=0")
+            for key, value in (headers or {}).items():
+                self.send_header(key, value)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
+        def send_html(self, body: str, status=HTTPStatus.OK):
+            raw = body.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store, max-age=0")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def send_login(self, error: str = ""):
+            self.send_html(access.login_page(error))
+
+        def current_user(self):
+            return access.check(self.headers.get("Cookie"))
+
+        def require_user(self) -> str | None:
+            if not access.enabled:
+                return "local"
+            return self.current_user()
+
+        def send_unauthorized(self):
+            self.send_json({"ok": False, "error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
+
+        def send_vendor(self, path: str):
+            relative = path[len("/vendor/"):]
+            if not relative:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            candidate = (VENDOR_ROOT / relative).resolve()
+            if VENDOR_ROOT not in candidate.parents or not candidate.is_file():
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            content_type = {
+                ".js": "text/javascript; charset=utf-8",
+                ".mjs": "text/javascript; charset=utf-8",
+                ".css": "text/css; charset=utf-8",
+                ".json": "application/json; charset=utf-8",
+                ".png": "image/png",
+                ".svg": "image/svg+xml",
+                ".woff2": "font/woff2",
+            }.get(candidate.suffix.lower(), "application/octet-stream")
+            data = candidate.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "public, max-age=3600")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
         def do_GET(self):
             path = urlparse(self.path).path
+            if path == "/login":
+                self.send_login()
+                return
+            if path == "/healthz":
+                self.send_json({"ok": True})
+                return
+            if access.enabled and not self.current_user():
+                if path in ("/", "/index.html"):
+                    self.send_login()
+                    return
+                if path.startswith("/api/"):
+                    self.send_unauthorized()
+                    return
+                self.send_error(HTTPStatus.UNAUTHORIZED)
+                return
+            if path == "/api/session":
+                self.send_json(
+                    {
+                        "ok": True,
+                        "experiment": access.experiment_mode,
+                        "user": access.active_user() if access.enabled else None,
+                    }
+                )
+                return
+            if path.startswith("/vendor/"):
+                self.send_vendor(path)
+                return
             if path == "/" or path == "/index.html":
-                body = HTML.encode("utf-8")
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Cache-Control", "no-store, max-age=0")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self.send_html(EXPERIMENT_HTML if access.experiment_mode else HTML)
                 return
             if path == "/api/models":
                 self.send_json({"models": [{"gender": gender, "label": label, "available": cache.available(gender)} for gender, label in GENDERS.items()]})
@@ -250,11 +331,69 @@ def handler_factory(cache: ModelCache):
                 return
             self.send_json({"ok": True, "has_displacement": True})
 
+        def _handle_admin_reset(self):
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+                data = json.loads(self.rfile.read(size).decode("utf-8"))
+            except Exception:
+                self.send_json({"ok": False, "error": "invalid admin payload"}, HTTPStatus.BAD_REQUEST)
+                return
+            if not access.admin_reset(str(data.get("token", ""))):
+                self.send_json({"ok": False, "error": "admin token rejected"}, HTTPStatus.FORBIDDEN)
+                return
+            cache.reset_session_state()
+            self.send_json({"ok": True})
+
+        def _handle_login(self):
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+                data = json.loads(self.rfile.read(size).decode("utf-8"))
+            except Exception:
+                self.send_json({"ok": False, "error": "invalid login payload"}, HTTPStatus.BAD_REQUEST)
+                return
+            status, token, message = access.login(
+                str(data.get("username", "")), str(data.get("token", ""))
+            )
+            if token is None:
+                self.send_json({"ok": False, "error": message}, status)
+                return
+            cache.reset_session_state()
+            self.send_json(
+                {"ok": True, "user": str(data.get("username", "")).strip()},
+                status,
+                headers={"Set-Cookie": access.session_cookie(token)},
+            )
+
         def do_POST(self):
             path = urlparse(self.path).path
-#             if path == "/api/reference":
-#                 self._handle_reference()
-#                 return
+            if path == "/api/admin/reset":
+                self._handle_admin_reset()
+                return
+            if path == "/api/login":
+                self._handle_login()
+                return
+            if path == "/api/logout":
+                access.logout(self.headers.get("Cookie"))
+                self.send_json(
+                    {"ok": True},
+                    headers={"Set-Cookie": access.clear_cookie()},
+                )
+                return
+            if path == "/api/ping":
+                if access.enabled and not self.current_user():
+                    self.send_unauthorized()
+                    return
+                self.send_json({"ok": True})
+                return
+            if access.enabled and not self.current_user():
+                self.send_unauthorized()
+                return
+            if path == "/api/autofit/path" and not access.allow_server_paths:
+                self.send_json(
+                    {"ok": False, "error": "server paths are disabled in experiment mode"},
+                    HTTPStatus.FORBIDDEN,
+                )
+                return
             if path.startswith("/api/autofit/upload/"):
                 self._handle_autofit_upload(path.rsplit("/", 1)[-1])
                 return
@@ -380,13 +519,23 @@ def main():
         print(f"[device] {args.device} requested but unusable -> cpu", flush=True)
     print(f"device: {device} — {reason}", flush=True)
     print(f"detector: {args.detector_dir}", flush=True)
+    try:
+        access = AccessController.from_env()
+    except RuntimeError as exc:
+        raise SystemExit(f"[access] {exc}") from exc
+    print(
+        f"access: {'experiment gate' if access.enabled else 'local (no gate)'}"
+        f" · server paths: {'allowed' if access.allow_server_paths else 'blocked'}",
+        flush=True,
+    )
     server = ThreadingHTTPServer(
         (args.host, args.port),
         handler_factory(
             ModelCache(
                 args.model_dir, args.cache_dir, device=device,
                 detector_dir=args.detector_dir,
-            )
+            ),
+            access=access,
         ),
     )
     print(f"SMPL-X viewer: http://{args.host}:{args.port}", flush=True)
