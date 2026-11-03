@@ -26,7 +26,8 @@
   main { min-width:0; min-height:0; position:relative; } canvas { display:block; width:100%; height:100%; }
   .hud { position:absolute; top:18px; right:18px; background:#1a1e25e8; border:1px solid #343b47; border-radius:6px; padding:11px 13px; color:#b9c2d0; font-size:12px; line-height:1.55; }
   .floating-tools { position:absolute; left:14px; top:18px; z-index:30; display:flex; flex-direction:column; align-items:flex-start; gap:8px; }
-  .tool-row { display:flex; gap:8px; }
+  .tool-row { display:flex; gap:8px; width:210px; }
+  .tool-btn.tool-wide { width:84px; height:42px; margin-left:auto; font-size:12px; }
   .floating-opacity { width:210px; box-sizing:border-box; padding:5px 8px; border:1px solid #303642; border-radius:8px; background:#1a1e25e8; backdrop-filter:blur(6px); }
   .floating-opacity .slider-field { margin:0; }
   .floating-opacity .slider-label { color:#c7d0dd; }
@@ -74,7 +75,7 @@
 <body><div id="app"><aside>
   <div><h1>SMPL-X T-pose</h1><p class="sub">选择性别模型。鼠标左键旋转，滚轮缩放，右键平移。</p></div>
   <details class="panel" open><summary class="section-title">人体模型</summary><select id="gender" aria-label="人体模型"></select></details>
-  <details class="panel" open><summary class="section-title">调整人体姿态</summary><div class="pose-controls"><label class="toggle"><input id="full-body-ik" type="checkbox"> <span>全身 IK</span></label><button id="reset" disabled>重置当前姿态</button></div><p class="sub">关闭时移动所选点及其子节点，父节点保持固定；开启后允许整条父链共同求解。</p></details>
+  <details class="panel" open><summary class="section-title">调整人体姿态</summary><div class="pose-controls"><label class="toggle"><input id="full-body-ik" type="checkbox"> <span>全身 IK</span></label></div><p class="sub">关闭时移动所选点及其子节点，父节点保持固定；开启后允许整条父链共同求解。</p></details>
   <details class="panel" open><summary class="section-title">骨段编辑</summary><div id="segment-editor" class="segment-empty">点击一条黄色骨骼连线以编辑该骨段。</div></details>
   <details class="panel" open><summary class="section-title">头部编辑</summary><div id="head-editor" class="segment-empty">正在读取头部参数...</div></details>
   <details class="panel" open><summary class="section-title">Auto-fit v0</summary><div class="ref-row fit-actions"><button id="fit-pick" class="small">选择文件</button><button id="fit-folder-pick" class="small">选择文件夹</button><button id="fit-run" class="small" disabled>开始拟合</button></div><input id="fit-file" type="file" accept="image/*,.zip,.tar,.tgz,.gz"><input id="fit-folder" type="file" webkitdirectory multiple><p class="sub" id="fit-info">支持：单张正+侧组合图 / 文件夹 / zip / tar.gz / tgz / 单张正视图。文件名不用于判断正/侧。</p></details>
@@ -83,7 +84,7 @@
   -->
   <details class="panel"><summary class="section-title">导出</summary><div class="segment-tools export-buttons"><button id="export-glb" class="small" title="下载带 55 关节蒙皮的 T-pose GLB">GLB</button><button id="export-params" class="small" title="下载 identity 参数 JSON">参数</button><button id="export-fourview" class="small" title="下载四视图 PNG + views.json">四视图</button></div><div class="segment-tools export-buttons" id="disp-buttons"><button id="disp-pick" class="small" title="导入 Blender shape key 导出的 (N,3) .npy">导入位移</button><button id="disp-clear" class="small" disabled title="移除已导入的位移">清除位移</button></div><input id="disp-file" type="file" accept=".npy,application/octet-stream"><p class="sub" id="export-help">GLB 带 55 关节蒙皮（Blender 会得到 Armature + Vertex Groups）；四视图为完整蒙皮截图（侧视隐藏手臂并标出肩/臂截面）；导出始终是 T-pose identity，不包含当前摆姿。位移会应用到 GLB/四视图。</p></details>
   <div id="status">正在读取模型信息...</div>
-</aside><main><canvas id="viewer"></canvas><div class="floating-tools" role="toolbar" aria-label="编辑工具"><div class="tool-row"><button id="symmetry-toggle" class="tool-btn" aria-pressed="false" title="对称编辑">对称</button><button id="undo-btn" class="tool-btn" title="撤回 (Ctrl+Z)" disabled>撤回</button><button id="logout-btn" class="tool-btn" title="退出实验" hidden>退出</button></div><div id="skin-opacity-host" class="floating-opacity" title="0 透明（只看骨架） / 1 半透明 / 2 不透明"></div></div><div class="hud">点击黄色身体关节后拖动<br>空白处拖动旋转 · 滚轮缩放</div><div id="toasts"></div></main></div>
+</aside><main><canvas id="viewer"></canvas><div class="floating-tools" role="toolbar" aria-label="编辑工具"><div class="tool-row"><button id="symmetry-toggle" class="tool-btn" aria-pressed="false" title="对称编辑">对称</button><button id="undo-btn" class="tool-btn" title="撤回 (Ctrl+Z)" disabled>撤回</button><button id="reset" class="tool-btn tool-wide" title="全部重置" disabled>全部重置</button><button id="logout-btn" class="tool-btn" title="退出实验" hidden>退出</button></div><div id="skin-opacity-host" class="floating-opacity" title="0 透明（只看骨架） / 1 半透明 / 2 不透明"></div></div><div class="hud">点击黄色身体关节后拖动<br>空白处拖动旋转 · 滚轮缩放</div><div id="toasts"></div></main></div>
 <div id="history-drawer" class="history-drawer" aria-hidden="true"><button id="history-tab" class="history-tab" aria-expanded="false">历史</button><aside class="history-panel"><div class="history-head"><strong>操作历史</strong><button id="history-close" class="small">关闭</button></div><p class="history-hint">单击任意一步回撤/重做</p><ol id="history-list" class="history-list"></ol></aside></div>
 <script type="importmap">{"imports":{"three":"/vendor/three.module.js","three/addons/":"/vendor/addons/"}}</script>
 <script type="module">

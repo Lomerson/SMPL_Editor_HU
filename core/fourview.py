@@ -2,8 +2,9 @@
 
 The output is a set of full shaded orthographic skin screenshots (not
 silhouettes).  The side views hide both arms, because in a T-pose the arms
-point at the camera and would leave a hand/finger bump on the torso; the near
-shoulder/arm cross-sections are still marked.
+point at the camera and would leave a hand/finger bump on the torso.  The
+legacy shoulder/arm cross-section circles are disabled; their code is kept
+commented.
 
 Views (world axes; SMPL-X is Y-up, +Z forward):
 
@@ -27,6 +28,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw
+from scipy import ndimage
 
 from core.config import GENDERS
 
@@ -123,6 +125,41 @@ def _vertex_normals(vertices, faces):
         np.add.at(normals, faces[:, corner], face_normals)
     lengths = np.linalg.norm(normals, axis=1, keepdims=True)
     return normals / np.maximum(lengths, 1e-12)
+
+
+def _fill_enclosed_white(image):
+    """Fill small white holes left by removing the arm triangles in a side view."""
+    pixels = np.asarray(image, dtype=np.uint8).copy()
+    white = np.all(pixels > 250, axis=2)
+    labels, count = ndimage.label(white)
+    if count == 0:
+        return image
+    border = np.concatenate(
+        (labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1])
+    )
+    background = set(int(value) for value in border if value)
+    holes = white.copy()
+    for label in range(1, count + 1):
+        if label in background:
+            holes[labels == label] = False
+    if not holes.any():
+        return image
+    ys, xs = np.where(holes)
+    center_x = float(xs.mean())
+    center_y = float(ys.mean())
+    radius = max(float(xs.max() - xs.min()), float(ys.max() - ys.min())) / 2.0
+    radius = max(radius, 1.0)
+    dx = (xs - center_x) / radius
+    dy = (ys - center_y) / radius
+    rr = np.clip(dx * dx + dy * dy, 0.0, 1.0)
+    nz = np.sqrt(1.0 - rr)
+    light = np.asarray([-0.32, -0.42, 0.85], dtype=np.float32)
+    light /= np.linalg.norm(light)
+    shade = np.clip(dx * light[0] + dy * light[1] + nz * light[2], 0.0, 1.0)
+    base = np.asarray(SKIN, dtype=np.float32)
+    color = (0.42 + 0.58 * shade)[:, None] * base
+    pixels[ys, xs] = np.clip(color, 0, 255).astype(np.uint8)
+    return Image.fromarray(pixels)
 
 
 def _render_view(vertices, faces, joints, view, scale, normals, arm_weight=None):
@@ -233,39 +270,43 @@ def build_fourview(cache, gender: str) -> bytes:
             vertices, faces, joints, view, scale, normals,
             arm_weight=both_arms if side_view else None,
         )
-        sections = []
         if side_view:
-            draw = ImageDraw.Draw(image)
-            root = 16 if name == "left" else 17
-            for joint, label in ((root, "肩部截面"), (root + 2, "手臂截面")):
-                radius_m = _section_radius(
-                    vertices, weights,
-                    left_arm if name == "left" else right_arm,
-                    joints[joint],
-                )
-                radius_px = float(np.clip(radius_m * scale, 4.0, 40.0))
-                x, y = joint_pixels[joint]
-                box = [
-                    x - radius_px,
-                    y - radius_px,
-                    x + radius_px,
-                    y + radius_px,
-                ]
-                style = "solid" if joint == root else "dashed"
-                if style == "solid":
-                    draw.ellipse(box, outline=SECTION, width=2)
-                else:
-                    _dashed_ellipse(draw, box, SECTION, width=2)
-                draw.ellipse([x - 1.5, y - 1.5, x + 1.5, y + 1.5], fill=SECTION)
-                sections.append(
-                    {
-                        "joint": int(joint),
-                        "label": label,
-                        "style": style,
-                        "center_px": [float(x), float(y)],
-                        "radius_px": radius_px,
-                    }
-                )
+            image = _fill_enclosed_white(image)
+        sections = []
+        # Legacy shoulder/arm cross-section circles are intentionally disabled.
+        # The code is kept commented for reference / future use.
+#         if side_view:
+#             draw = ImageDraw.Draw(image)
+#             root = 16 if name == "left" else 17
+#             for joint, label in ((root, "肩部截面"), (root + 2, "手臂截面")):
+#                 radius_m = _section_radius(
+#                     vertices, weights,
+#                     left_arm if name == "left" else right_arm,
+#                     joints[joint],
+#                 )
+#                 radius_px = float(np.clip(radius_m * scale, 4.0, 40.0))
+#                 x, y = joint_pixels[joint]
+#                 box = [
+#                     x - radius_px,
+#                     y - radius_px,
+#                     x + radius_px,
+#                     y + radius_px,
+#                 ]
+#                 style = "solid" if joint == root else "dashed"
+#                 if style == "solid":
+#                     draw.ellipse(box, outline=SECTION, width=2)
+#                 else:
+#                     _dashed_ellipse(draw, box, SECTION, width=2)
+#                 draw.ellipse([x - 1.5, y - 1.5, x + 1.5, y + 1.5], fill=SECTION)
+#                 sections.append(
+#                     {
+#                         "joint": int(joint),
+#                         "label": label,
+#                         "style": style,
+#                         "center_px": [float(x), float(y)],
+#                         "radius_px": radius_px,
+#                     }
+#                 )
         images[name] = image
         view_info[name] = {
             "file": f"{name}.png",
@@ -305,10 +346,9 @@ def build_fourview(cache, gender: str) -> bytes:
         "margin_px": MARGIN,
         "head": cache.head(gender),
         "views": view_info,
-        "notes": "Full shaded skin screenshots; side views hide both arms and "
-                 "mark the near shoulder/arm cross-sections.  All four views "
-                 "share one pixel scale and are rendered from the edited rest "
-                 "mesh, not from the temporary view pose.",
+        "notes": "Full shaded skin screenshots; side views hide both arms.  "
+                 "All four views share one pixel scale and are rendered from "
+                 "the edited rest mesh, not from the temporary view pose.",
     }
 
     output = io.BytesIO()

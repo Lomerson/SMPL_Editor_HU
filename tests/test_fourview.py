@@ -71,18 +71,7 @@ class FourViewTest(unittest.TestCase):
         for name in ("left", "right"):
             info = self.metadata["views"][name]
             self.assertTrue(info["arms_hidden"])
-            self.assertEqual(len(info["arm_sections"]), 2)
-            self.assertEqual(
-                [section["style"] for section in info["arm_sections"]],
-                ["solid", "dashed"],
-            )
-            for section in info["arm_sections"]:
-                x, y = section["center_px"]
-                self.assertGreaterEqual(x, 0)
-                self.assertLess(x, 1024)
-                self.assertGreaterEqual(y, 0)
-                self.assertLess(y, 1024)
-                self.assertGreater(section["radius_px"], 0.0)
+            self.assertEqual(info["arm_sections"], [])
         self.assertEqual(self.metadata["views"]["front"]["arm_sections"], [])
         self.assertEqual(self.metadata["views"]["back"]["arm_sections"], [])
 
