@@ -196,7 +196,7 @@ class AccessController:
             self._expire_locked(time.time())
             return self._active_user
 
-    def session_cookie(self, token: str) -> str:
+    def session_cookie(self, token: str, secure: bool | None = None) -> str:
         max_age = int(max(self.ttl * 4, 600))
         bits = [
             f"{COOKIE_NAME}={token}",
@@ -205,11 +205,11 @@ class AccessController:
             "SameSite=Lax",
             f"Max-Age={max_age}",
         ]
-        if self.cookie_secure:
+        if (self.cookie_secure if secure is None else bool(secure)):
             bits.append("Secure")
         return "; ".join(bits)
 
-    def clear_cookie(self) -> str:
+    def clear_cookie(self, secure: bool | None = None) -> str:
         bits = [
             f"{COOKIE_NAME}=",
             "Path=/",
@@ -217,7 +217,7 @@ class AccessController:
             "SameSite=Lax",
             "Max-Age=0",
         ]
-        if self.cookie_secure:
+        if (self.cookie_secure if secure is None else bool(secure)):
             bits.append("Secure")
         return "; ".join(bits)
 

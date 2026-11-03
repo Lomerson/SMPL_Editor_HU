@@ -33,6 +33,8 @@ class AccessTest(unittest.TestCase):
         self.assertIn(COOKIE_NAME + "=", cookie)
         self.assertIn("HttpOnly", cookie)
         self.assertNotIn("Secure", cookie)
+        self.assertIn("Secure", self.access.session_cookie(token, secure=True))
+        self.assertNotIn("Secure", self.access.session_cookie(token, secure=False))
         self.assertEqual(self.access.check(cookie), "u_alpha")
 
     def test_wrong_credentials(self):

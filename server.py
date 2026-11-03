@@ -55,6 +55,14 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
         def send_login(self, error: str = ""):
             self.send_html(access.login_page(error))
 
+        def cookie_secure(self):
+            origin = str(self.headers.get("Origin", "")).lower()
+            if origin.startswith("https://"):
+                return True
+            if origin.startswith("http://"):
+                return False
+            return None
+
         def current_user(self):
             return access.check(self.headers.get("Cookie"))
 
@@ -361,7 +369,11 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
             self.send_json(
                 {"ok": True, "user": str(data.get("username", "")).strip()},
                 status,
-                headers={"Set-Cookie": access.session_cookie(token)},
+                headers={
+                    "Set-Cookie": access.session_cookie(
+                        token, secure=self.cookie_secure()
+                    )
+                },
             )
 
         def do_POST(self):
@@ -376,7 +388,11 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
                 access.logout(self.headers.get("Cookie"))
                 self.send_json(
                     {"ok": True},
-                    headers={"Set-Cookie": access.clear_cookie()},
+                    headers={
+                        "Set-Cookie": access.clear_cookie(
+                            secure=self.cookie_secure()
+                        )
+                    },
                 )
                 return
             if path == "/api/ping":
