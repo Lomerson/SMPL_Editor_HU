@@ -44,6 +44,7 @@ class FourViewTest(unittest.TestCase):
             {"front.png", "back.png", "left.png", "right.png", "views.json"},
         )
         self.assertEqual(self.metadata["schema"], "smplx-fourview/1")
+        self.assertEqual(self.metadata["render_mode"], "shaded")
         self.assertTrue(self.metadata["tpose"])
         self.assertEqual(self.metadata["resolution"], [1024, 1024])
         self.assertGreater(self.metadata["scale_px_per_m"], 0.0)
