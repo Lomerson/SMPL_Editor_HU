@@ -1,5 +1,6 @@
 legacy/
 outputs/
+questionnaire/
 
 *.md
 run_local.sh
@@ -10,3 +11,11 @@ run_local.sh
 # # 忽略本地配置文件
 # config.ini
 # .env
+# Python caches
+__pycache__/
+*.pyc
+
+# Experiment secrets and logs
+experiment/participants.json
+experiment/*.log
+experiment/sessions/
