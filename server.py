@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import io
 import json
 import os
+import tempfile
 
 import numpy as np
 from http import HTTPStatus
@@ -289,6 +291,46 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
                 return
             self.send_json(result)
 
+        def _handle_autofit_files(self, gender, data):
+            """Auto-fit a folder uploaded as a JSON base64 file set."""
+            entries = data.get("files")
+            if not isinstance(entries, list) or not entries:
+                self.send_json({"ok": False, "error": "folder contains no files"}, HTTPStatus.BAD_REQUEST)
+                return
+            if len(entries) > 500:
+                self.send_json({"ok": False, "error": "folder has more than 500 files"}, HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                with tempfile.TemporaryDirectory(prefix="autofit_folder_") as temporary:
+                    root = Path(temporary)
+                    total = 0
+                    for entry in entries:
+                        name = str((entry or {}).get("name", ""))
+                        payload = (entry or {}).get("data", "")
+                        if not name or not payload:
+                            continue
+                        if "," in payload:
+                            payload = payload.split(",", 1)[1]
+                        relative = Path(name.replace("\\", "/"))
+                        if relative.is_absolute() or any(part in ("..", "") for part in relative.parts):
+                            continue
+                        raw = base64.b64decode(payload, validate=True)
+                        total += len(raw)
+                        if total > 64 * 1024 * 1024:
+                            raise ValueError("folder larger than 64 MiB")
+                        target = root / relative
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(raw)
+                    result = autofit.run(cache, gender, path=str(root))
+                    result["source"] = "文件夹（上传）"
+                self.send_json(result)
+            except FileNotFoundError:
+                self.send_error(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
+            except ValueError as exc:
+                self.send_error(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc))
+            except Exception as exc:
+                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, f"{type(exc).__name__}: {exc}")
+
         def _handle_autofit_upload(self, gender):
             """Run auto-fit on a raw image/zip/tar upload."""
             try:
@@ -463,6 +505,9 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
                 if path == "/api/displacement/reset":
                     cache.reset_displacement(gender)
                     self.send_json({"ok": True, "has_displacement": False})
+                    return
+                if path == "/api/autofit/files":
+                    self._handle_autofit_files(gender, data)
                     return
                 if path == "/api/autofit/path":
                     result = autofit.run(

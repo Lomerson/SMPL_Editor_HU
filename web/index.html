@@ -25,7 +25,11 @@
   button:disabled { color:#697383; cursor:not-allowed; } #status { margin-top:auto; color:#aeb7c6; font-size:12px; line-height:1.55; }
   main { min-width:0; min-height:0; position:relative; } canvas { display:block; width:100%; height:100%; }
   .hud { position:absolute; top:18px; right:18px; background:#1a1e25e8; border:1px solid #343b47; border-radius:6px; padding:11px 13px; color:#b9c2d0; font-size:12px; line-height:1.55; }
-  .floating-tools { position:absolute; left:14px; top:18px; z-index:30; display:flex; gap:8px; }
+  .floating-tools { position:absolute; left:14px; top:18px; z-index:30; display:flex; flex-direction:column; align-items:flex-start; gap:8px; }
+  .tool-row { display:flex; gap:8px; }
+  .floating-opacity { width:210px; box-sizing:border-box; padding:5px 8px; border:1px solid #303642; border-radius:8px; background:#1a1e25e8; backdrop-filter:blur(6px); }
+  .floating-opacity .slider-field { margin:0; }
+  .floating-opacity .slider-label { color:#c7d0dd; }
   .tool-btn { width:42px; height:42px; border-radius:12px; border:1px solid #414957; background:#1a1e25e8; color:#eff2f7; padding:0; font-size:12px; line-height:1; text-align:center; cursor:pointer; backdrop-filter:blur(6px); }
   .tool-btn:hover { border-color:#7da6ef; background:#293544; }
   .tool-btn.active { background:#24559a; border-color:#70a5f3; color:#fff; }
@@ -39,7 +43,9 @@
   .history-head .small { min-height:28px; padding:0 8px; font-size:12px; }
   .history-hint { color:#8f99a9; font-size:11px; margin:8px 0 10px; }
   .history-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:4px; }
-  .history-list li { padding:7px 8px; border-radius:6px; border:1px solid transparent; color:#c7d0dd; font-size:12px; line-height:1.4; cursor:default; user-select:none; }
+  .history-list li { display:grid; grid-template-columns:2.4em minmax(0,1fr); column-gap:4px; padding:7px 8px; border-radius:6px; border:1px solid transparent; color:#c7d0dd; font-size:12px; line-height:1.45; cursor:default; user-select:none; }
+  .history-index { color:#8f99a9; text-align:right; font-variant-numeric:tabular-nums; }
+  .history-text { white-space:pre-line; min-width:0; }
   .history-list li.future { color:#7f8a9b; }
   .history-list li.current { color:#fff; background:#24559a; border-color:#70a5f3; }
   .history-list li:hover { border-color:#414957; }
@@ -58,27 +64,26 @@
   .step-btn:hover:not(:disabled) { border-color:#7da6ef; background:#293544; }
   .export-buttons button { flex:1 1 0; min-width:0; padding:0 4px; font-size:11px; text-align:center; }
   #skin-opacity-row { grid-template-columns:44px minmax(0,1fr) 40px; }
-  #skin-opacity-host { margin-top:8px; }
-  #disp-file, #fit-file { display:none; }
-  #fit-path { flex:1; min-width:0; min-height:34px; border:1px solid #414957; border-radius:6px; background:#252b35; color:#eff2f7; padding:0 8px; font-size:12px; }
-  #fit-run, #fit-path-run { min-height:34px; font-size:12px; }
+  #disp-file, #fit-file, #fit-folder { display:none; }
+  .fit-actions { gap:4px; }
+  .fit-actions button { flex:1 1 0; min-width:0; padding:0 3px; font-size:11px; text-align:center; white-space:nowrap; }
   .step-btn:disabled { color:#697383; cursor:not-allowed; opacity:.5; }
   .skeleton-locked #seg-length-row { cursor:not-allowed; } .ref-row { display:flex; gap:8px; align-items:stretch; } #ref-pick { flex:1 1 auto; min-width:0; text-align:center; } #ref-hide, #ref-clear { flex:0 0 62px; min-width:62px; text-align:center; } #ref-file { display:none; } .ref-info { margin:8px 0 0; } @media(max-width:700px) { #app{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)} aside{padding:14px; border-right:0; border-bottom:1px solid #303642; gap:12px}.gender{grid-template-columns:repeat(3,1fr)} button{font-size:12px;text-align:center} #status{margin-top:0} }
 </style>
 </head>
 <body><div id="app"><aside>
   <div><h1>SMPL-X T-pose</h1><p class="sub">选择性别模型。鼠标左键旋转，滚轮缩放，右键平移。</p></div>
-  <details class="panel" open><summary class="section-title">人体模型</summary><select id="gender" aria-label="人体模型"></select><div id="skin-opacity-host"></div><p class="sub">蒙皮透明度：透明（只看骨架）/ 半透明 / 不透明</p></details>
+  <details class="panel" open><summary class="section-title">人体模型</summary><select id="gender" aria-label="人体模型"></select></details>
   <details class="panel" open><summary class="section-title">调整人体姿态</summary><div class="pose-controls"><label class="toggle"><input id="full-body-ik" type="checkbox"> <span>全身 IK</span></label><button id="reset" disabled>重置当前姿态</button></div><p class="sub">关闭时移动所选点及其子节点，父节点保持固定；开启后允许整条父链共同求解。</p></details>
   <details class="panel" open><summary class="section-title">骨段编辑</summary><div id="segment-editor" class="segment-empty">点击一条黄色骨骼连线以编辑该骨段。</div></details>
   <details class="panel" open><summary class="section-title">头部编辑</summary><div id="head-editor" class="segment-empty">正在读取头部参数...</div></details>
-  <details class="panel" open><summary class="section-title">Auto-fit v0</summary><div class="ref-row"><button id="fit-pick">选择图片/压缩包</button><button id="fit-run" class="small" disabled>开始拟合</button></div><input id="fit-file" type="file" accept="image/*,.zip,.tar,.tgz,.gz"><p class="sub" id="fit-info">支持：单张正+侧组合图 / 目录路径 / zip / tar.gz / tgz / 单张正视图。文件名不用于判断正/侧。</p><div class="ref-row" id="fit-path-row"><input id="fit-path" value="/home/lomerson/MyProjects/ui" aria-label="服务器图片/目录/压缩包路径"><button id="fit-path-run" class="small">按路径拟合</button></div></details>
+  <details class="panel" open><summary class="section-title">Auto-fit v0</summary><div class="ref-row fit-actions"><button id="fit-pick" class="small">选择文件</button><button id="fit-folder-pick" class="small">选择文件夹</button><button id="fit-run" class="small" disabled>开始拟合</button></div><input id="fit-file" type="file" accept="image/*,.zip,.tar,.tgz,.gz"><input id="fit-folder" type="file" webkitdirectory multiple><p class="sub" id="fit-info">支持：单张正+侧组合图 / 文件夹 / zip / tar.gz / tgz / 单张正视图。文件名不用于判断正/侧。</p></details>
   <!-- 参考图自动对齐已停用，代码保留供 auto-fit 后续参考。
   <details class="panel" open><summary class="section-title">参考图</summary><div class="ref-row"><button id="ref-pick">选择图片</button><button id="ref-hide" class="small" disabled>隐藏</button><button id="ref-clear" class="small" disabled>移除</button></div><input id="ref-file" type="file" accept="image/png,image/jpeg,image/jpg,image/webp,image/bmp,image/gif,image/tiff,image/*"><p class="sub ref-info" id="ref-info">未选择图片。上传后自动用 AnimePoseDetector 对齐双眼。</p></details>
   -->
-  <details class="panel"><summary class="section-title">导出</summary><div class="segment-tools export-buttons"><button id="export-glb" class="small" title="下载带 55 关节蒙皮的 T-pose GLB">GLB</button><button id="export-params" class="small" title="下载 identity 参数 JSON">参数</button><button id="export-fourview" class="small" title="下载四视图 PNG + views.json">四视图</button></div><div class="segment-tools export-buttons" id="disp-buttons"><button id="disp-pick" class="small" title="导入 Blender shape key 导出的 (N,3) .npy">导入位移</button><button id="disp-clear" class="small" disabled title="移除已导入的位移">清除位移</button></div><input id="disp-file" type="file" accept=".npy,application/octet-stream"><p class="sub" id="export-help">GLB 带 55 关节蒙皮（Blender 会得到 Armature + Vertex Groups）；四视图为剪影 + 眼睛位置；导出始终是 T-pose identity，不包含当前摆姿。位移会应用到 GLB/四视图。</p></details>
+  <details class="panel"><summary class="section-title">导出</summary><div class="segment-tools export-buttons"><button id="export-glb" class="small" title="下载带 55 关节蒙皮的 T-pose GLB">GLB</button><button id="export-params" class="small" title="下载 identity 参数 JSON">参数</button><button id="export-fourview" class="small" title="下载四视图 PNG + views.json">四视图</button></div><div class="segment-tools export-buttons" id="disp-buttons"><button id="disp-pick" class="small" title="导入 Blender shape key 导出的 (N,3) .npy">导入位移</button><button id="disp-clear" class="small" disabled title="移除已导入的位移">清除位移</button></div><input id="disp-file" type="file" accept=".npy,application/octet-stream"><p class="sub" id="export-help">GLB 带 55 关节蒙皮（Blender 会得到 Armature + Vertex Groups）；四视图为完整蒙皮截图（侧视隐藏手臂并标出肩/臂截面）；导出始终是 T-pose identity，不包含当前摆姿。位移会应用到 GLB/四视图。</p></details>
   <div id="status">正在读取模型信息...</div>
-</aside><main><canvas id="viewer"></canvas><div class="floating-tools" role="toolbar" aria-label="编辑工具"><button id="symmetry-toggle" class="tool-btn" aria-pressed="false" title="对称编辑">对称</button><button id="undo-btn" class="tool-btn" title="撤回 (Ctrl+Z)" disabled>撤回</button><button id="logout-btn" class="tool-btn" title="退出实验" hidden>退出</button></div><div class="hud">点击黄色身体关节后拖动<br>空白处拖动旋转 · 滚轮缩放</div><div id="toasts"></div></main></div>
+</aside><main><canvas id="viewer"></canvas><div class="floating-tools" role="toolbar" aria-label="编辑工具"><div class="tool-row"><button id="symmetry-toggle" class="tool-btn" aria-pressed="false" title="对称编辑">对称</button><button id="undo-btn" class="tool-btn" title="撤回 (Ctrl+Z)" disabled>撤回</button><button id="logout-btn" class="tool-btn" title="退出实验" hidden>退出</button></div><div id="skin-opacity-host" class="floating-opacity" title="0 透明（只看骨架） / 1 半透明 / 2 不透明"></div></div><div class="hud">点击黄色身体关节后拖动<br>空白处拖动旋转 · 滚轮缩放</div><div id="toasts"></div></main></div>
 <div id="history-drawer" class="history-drawer" aria-hidden="true"><button id="history-tab" class="history-tab" aria-expanded="false">历史</button><aside class="history-panel"><div class="history-head"><strong>操作历史</strong><button id="history-close" class="small">关闭</button></div><p class="history-hint">单击任意一步回撤/重做</p><ol id="history-list" class="history-list"></ol></aside></div>
 <script type="importmap">{"imports":{"three":"/vendor/three.module.js","three/addons/":"/vendor/addons/"}}</script>
 <script type="module">
@@ -98,7 +103,7 @@ const MESH_OPACITY=0.42;
 const EXPERIMENT_MODE=!!window.__SMPLX_EXPERIMENT__;
 function applyExperimentMode(){
   if(!EXPERIMENT_MODE)return;
-  ['export-glb','export-params','disp-buttons','fit-path-row'].forEach((id)=>{
+  ['export-glb','export-params','disp-buttons'].forEach((id)=>{
     const element=document.querySelector('#'+id);
     if(element)element.hidden=true;
   });
@@ -645,6 +650,7 @@ function updateDisplacementButtons(present){
   if(clear)clear.disabled=!present;
 }
 let autofitFile=null;
+let autofitFolderFiles=null;
 function showAutofitInfo(result){
   const host=document.querySelector('#fit-info');
   if(!host)return;
@@ -657,16 +663,30 @@ function showAutofitInfo(result){
   if(result.warnings&&result.warnings.length)bits.push(`注意：${result.warnings.join('；')}`);
   host.textContent=bits.join(' · ');
 }
+function fileToBase64(file){
+  return new Promise((resolve,reject)=>{
+    const reader=new FileReader();
+    reader.onload=()=>{
+      const result=String(reader.result||'');
+      const comma=result.indexOf(',');
+      resolve(comma>=0?result.slice(comma+1):result);
+    };
+    reader.onerror=()=>reject(reader.error||Error('文件读取失败'));
+    reader.readAsDataURL(file);
+  });
+}
 async function runAutofit(mode){
   if(!selected)return;
-  const pathInput=document.querySelector('#fit-path');
-  setStatus(mode==='path'?'Auto-fit v0 正在读取路径...':'Auto-fit v0 正在分析上传...');
+  setStatus(mode==='folder'?'Auto-fit v0 正在读取文件夹...':'Auto-fit v0 正在分析上传...');
   try{
     let response;
-    if(mode==='path'){
-      const path=(pathInput&&pathInput.value||'').trim();
-      if(!path)throw Error('请输入服务器图片/目录/压缩包路径');
-      response=await fetch('/api/autofit/path',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,path})});
+    if(mode==='folder'){
+      if(!autofitFolderFiles||!autofitFolderFiles.length)throw Error('请先选择包含正/侧视图的文件夹');
+      const files=await Promise.all(autofitFolderFiles.map(async (file)=>({
+        name:file.webkitRelativePath||file.name,
+        data:await fileToBase64(file),
+      })));
+      response=await fetch('/api/autofit/files',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,files})});
     }else{
       if(!autofitFile)throw Error('请先选择图片/压缩包');
       response=await fetch('/api/autofit/upload/'+selected,{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Filename':autofitFile.name},body:autofitFile});
@@ -706,9 +726,15 @@ function renderHistory(history){
   history.entries.forEach((entry,index)=>{if(entry.id===currentId)currentIndex=index;});
   history.entries.forEach((entry,index)=>{
     const item=document.createElement('li');
-    item.textContent=(index+1)+'. '+entry.label;
+    const indexLabel=document.createElement('span');
+    indexLabel.className='history-index';
+    indexLabel.textContent=(index+1)+'.';
+    const textLabel=document.createElement('span');
+    textLabel.className='history-text';
+    textLabel.textContent=entry.label;
+    item.append(indexLabel,textLabel);
     item.dataset.id=String(entry.id);
-    item.title='单击回到这一步';
+    item.title='单击回到这一步：'+entry.label.replace(/\n/g,' / ');
     if(entry.id===currentId)item.classList.add('current');
     else if(index>currentIndex)item.classList.add('future');
     item.addEventListener('click',()=>jumpHistory(entry.id));
@@ -717,7 +743,7 @@ function renderHistory(history){
   if(undo){
     undo.disabled=!history.can_undo;
     const previous=currentIndex>0?history.entries[currentIndex-1]:null;
-    undo.title=history.can_undo&&previous?'撤回：'+previous.label:'没有可撤回的操作';
+    undo.title=history.can_undo&&previous?'撤回：'+previous.label.replace(/\n/g,' / '):'没有可撤回的操作';
   }
 }
 async function undoLast(){
@@ -730,7 +756,7 @@ async function undoLast(){
     if(!data.ok){renderHistory(data.history);setStatus('没有可撤回的操作');return;}
     selectedSegment=null;
     await load(selected,true,true);
-    setStatus('已撤回：'+data.label);
+    setStatus('已撤回：'+data.label.replace(/\n/g,' / '));
   }catch(error){setStatus('撤回失败：'+error.message,true);}
   finally{undoBusy=false;}
 }
@@ -743,7 +769,7 @@ async function jumpHistory(entryId){
     const data=await response.json();
     selectedSegment=null;
     await load(selected,true,true);
-    setStatus('已回到：'+data.label);
+    setStatus('已回到：'+data.label.replace(/\n/g,' / '));
   }catch(error){setStatus('历史跳转失败：'+error.message,true);}
   finally{undoBusy=false;}
 }
@@ -880,13 +906,14 @@ const dispPick=document.querySelector('#disp-pick'), dispClear=document.querySel
 dispPick.onclick=()=>dispFile.click();
 dispFile.onchange=()=>{const file=dispFile.files&&dispFile.files[0];dispFile.value='';if(file)importDisplacement(file);};
 dispClear.onclick=async()=>{if(!selected)return;setStatus('正在清除位移...');try{const response=await fetch('/api/displacement/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected})});if(!response.ok)throw Error(await response.text());await load(selected,true,true);updateDisplacementButtons(false);setStatus('已清除位移');}catch(error){setStatus('清除位移失败：'+error.message,true);}};
-const fitPick=document.querySelector('#fit-pick'), fitFileInput=document.querySelector('#fit-file'), fitRun=document.querySelector('#fit-run'), fitPathRun=document.querySelector('#fit-path-run');
+const fitPick=document.querySelector('#fit-pick'), fitFolderPick=document.querySelector('#fit-folder-pick'), fitFileInput=document.querySelector('#fit-file'), fitFolderInput=document.querySelector('#fit-folder'), fitRun=document.querySelector('#fit-run');
 const logoutBtn=document.querySelector('#logout-btn');
 if(logoutBtn)logoutBtn.onclick=async()=>{try{await fetch('/api/logout',{method:'POST'});}catch(_error){}window.location.href='/login';};
 fitPick.onclick=()=>fitFileInput.click();
-fitFileInput.onchange=()=>{const file=fitFileInput.files&&fitFileInput.files[0];fitFileInput.value='';if(!file)return;autofitFile=file;fitRun.disabled=false;document.querySelector('#fit-info').textContent='已选择 '+file.name+'，点击「开始拟合」';};
-fitRun.onclick=()=>runAutofit('file');
-fitPathRun.onclick=()=>runAutofit('path');
+fitFolderPick.onclick=()=>fitFolderInput.click();
+fitFileInput.onchange=()=>{const file=fitFileInput.files&&fitFileInput.files[0];fitFileInput.value='';if(!file)return;autofitFile=file;autofitFolderFiles=null;fitRun.disabled=false;document.querySelector('#fit-info').textContent='已选择文件 '+file.name+'，点击「开始拟合」';};
+fitFolderInput.onchange=()=>{const imagePattern=/\.(png|jpe?g|webp|bmp|gif|tiff?)$/i;const files=[...fitFolderInput.files].filter(file=>imagePattern.test(file.name));fitFolderInput.value='';if(!files.length){autofitFolderFiles=null;fitRun.disabled=true;document.querySelector('#fit-info').textContent='文件夹里没有图片';return;}autofitFolderFiles=files;autofitFile=null;fitRun.disabled=false;document.querySelector('#fit-info').textContent='已选择文件夹（'+files.length+' 个图片），点击「开始拟合」';};
+fitRun.onclick=()=>runAutofit(autofitFolderFiles&&autofitFolderFiles.length?'folder':'file');
 const symmetryToggle=document.querySelector('#symmetry-toggle');
 if(symmetryToggle)symmetryToggle.onclick=()=>setSymmetric(!symmetric);
 const undoBtn=document.querySelector('#undo-btn');

@@ -12,7 +12,7 @@ from core.config import DEVICE_CHOICES, GENDERS, JOINT_NAMES
 from core.deform import LENGTH_MAX, LENGTH_MIN
 from core.fitting import init as fitting_init
 from core.head import HEAD_DEFAULTS, normalize_head_params
-from core.symmetry import joint_targets, mirror_target, segment_targets
+from core.symmetry import joint_targets, mirror_joint, mirror_segment, mirror_target, segment_targets
 
 def resolve_device(requested: str = "auto") -> tuple[str, str]:
     """Decide where SMPL-X inference runs, before any weights are loaded.
@@ -336,18 +336,43 @@ class ModelCache:
                 "history": self._history_state_locked(history),
             }
 
+    @staticmethod
+    def _same_radii(left, right) -> bool:
+        if len(left) < 2 or len(right) < 2:
+            return left == right
+        t = np.linspace(0.0, 1.0, 11)
+        a = np.interp(t, np.linspace(0.0, 1.0, len(left)), left)
+        b = np.interp(t, np.linspace(0.0, 1.0, len(right)), right)
+        return bool(np.max(np.abs(a - b)) <= 1e-9)
+
     def _segment_label(self, gender: str, child: int, symmetric: bool = False,
-                       reset: bool = False) -> str:
+                       reset: bool = False, kind: str = "长度") -> str:
         parents = self._model(gender).parents.cpu().numpy()
-        parent = int(parents[child])
-        name = f"{JOINT_NAMES[parent]}→{JOINT_NAMES[child]}"
-        if symmetric and child in (1, 2, 4, 5, 7, 8, 10, 11, 13, 14, 16, 17, 18, 19, 20, 21):
-            name = f"对称 {name}"
-        return ("重置骨段 " if reset else "骨段 ") + name
+
+        def name(segment):
+            parent = int(parents[segment])
+            return f"{JOINT_NAMES[parent]}→{JOINT_NAMES[segment]}"
+
+        prefix = "重置骨段" if reset else f"骨段{kind}"
+        if not symmetric:
+            return f"{prefix} {name(child)}"
+        mirror = mirror_segment(child)
+        if mirror is None:
+            return f"{prefix} {name(child)}"
+        left, right = sorted((int(child), int(mirror)))
+        return f"{prefix} {name(left)}\n{prefix} {name(right)}"
 
     def _pose_label(self, gender: str, joint: int, symmetric: bool) -> str:
         name = JOINT_NAMES[joint] if 0 <= joint < len(JOINT_NAMES) else str(joint)
-        return ("对称姿态 " if symmetric else "姿态 ") + name
+        if not symmetric:
+            return f"姿态 {name}"
+        mirror = mirror_joint(joint)
+        if mirror is None:
+            return f"姿态 {name}"
+        left, right = sorted((int(joint), int(mirror)))
+        left_name = JOINT_NAMES[left] if left < len(JOINT_NAMES) else str(left)
+        right_name = JOINT_NAMES[right] if right < len(JOINT_NAMES) else str(right)
+        return f"姿态 {left_name}\n姿态 {right_name}"
 
     def head(self, gender: str) -> dict:
         values = dict(HEAD_DEFAULTS)
@@ -506,6 +531,23 @@ class ModelCache:
             )
         targets = segment_targets(child, symmetric)
         with self.lock:
+            before = {}
+            for target in targets:
+                entry = self._segments(gender).get(str(target), {})
+                before[target] = (
+                    float(entry.get("length", 1.0)),
+                    list(entry.get("radii", [1.0, 1.0, 1.0])),
+                )
+            length_changed = any(abs(before[target][0] - length) > 1e-9 for target in targets)
+            radii_changed = any(
+                not self._same_radii(before[target][1], radii) for target in targets
+            )
+            if length_changed and radii_changed:
+                kind = "长度/粗细"
+            elif radii_changed:
+                kind = "粗细"
+            else:
+                kind = "长度"
             base = self._history_begin_locked(gender) if record else None
             try:
                 for target in targets:
@@ -516,7 +558,7 @@ class ModelCache:
                 raise
             if record:
                 self._history_commit_locked(
-                    gender, self._segment_label(gender, child, symmetric), base
+                    gender, self._segment_label(gender, child, symmetric, kind=kind), base
                 )
 
     def reset_segment(self, gender: str, child: int, keep_length: bool = False,

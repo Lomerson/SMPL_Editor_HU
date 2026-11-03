@@ -41,7 +41,13 @@ class HistoryTest(unittest.TestCase):
         history = self.cache.history_state(GENDER)
         self.assertEqual(len(history["entries"]), 2)
         self.assertTrue(history["can_undo"])
-        self.assertIn("对称", history["entries"][-1]["label"])
+        label = history["entries"][-1]["label"]
+        self.assertNotIn("对称", label)
+        lines = label.splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertIn("左肩", lines[0])
+        self.assertIn("右肩", lines[1])
+        self.assertTrue(lines[0].startswith("骨段"))
         entry_id = history["entries"][-1]["id"]
 
         result = self.cache.undo(GENDER)
@@ -54,6 +60,18 @@ class HistoryTest(unittest.TestCase):
         self.assertTrue(redo["ok"])
         self.assertIn("18", self.cache._segments(GENDER))
         self.assertIn("19", self.cache._segments(GENDER))
+
+    def test_length_and_girth_labels_are_distinct(self):
+        self.cache.update_segment(GENDER, 18, 0.9, [1.0, 1.0])
+        self.assertEqual(
+            self.cache.history_state(GENDER)["entries"][-1]["label"],
+            "骨段长度 左肩→左肘",
+        )
+        self.cache.update_segment(GENDER, 18, 0.9, [0.9, 0.9])
+        self.assertEqual(
+            self.cache.history_state(GENDER)["entries"][-1]["label"],
+            "骨段粗细 左肩→左肘",
+        )
 
     def test_new_edit_after_undo_truncates_future(self):
         self.cache.update_head(GENDER, {"head_length": 1.1})
@@ -83,6 +101,12 @@ class HistoryTest(unittest.TestCase):
         self.assertTrue(undo["ok"])
         self.assertIsNone(self.cache.displacement(GENDER))
         self.assertAlmostEqual(self.cache.head(GENDER)["head_length"], 1.1)
+
+    def test_symmetric_pose_label_lists_left_then_right(self):
+        self.assertEqual(
+            self.cache._pose_label(GENDER, 21, True),
+            "姿态 左腕\n姿态 右腕",
+        )
 
     def test_pose_edit_is_undoable(self):
         _model, _vertices, base_joints, _parents = self.cache._geometry(GENDER)
