@@ -173,6 +173,53 @@ class AutofitTest(unittest.TestCase):
         else:
             self.assertLessEqual(front["rms_px"], front["rms_after_scale_px"] + 1.0)
 
+    def test_leg_joint_weights_reduce_leg_errors(self):
+        images, _source, _single = autofit._collect_images(
+            None, filename="", path=str(PROJECT / "ui")
+        )
+        candidates = autofit._split_candidates(self.cache, images, True)
+        front = max(
+            [item for item in candidates if item["aspect"] >= autofit.FRONT_ASPECT_MIN],
+            key=lambda item: item["area"],
+        )
+        reference = self.cache.reference_eyes(autofit._png_bytes(front["rgb"]))
+        bbox = front["bbox"]
+        model_height = float(
+            self.cache.rest_geometry(GENDER)[1][:, 1].max()
+            - self.cache.rest_geometry(GENDER)[1][:, 1].min()
+        )
+        ppm = float(bbox[3]) / max(model_height, 1e-6)
+
+        def leg_rms(joint_weights):
+            self.cache.reset(GENDER, record=False)
+            self.cache.solve_reference_lengths(
+                GENDER, ppm, reference["eye_midpoint"], reference["joints"],
+                z_weight=3.0, joint_weights=joint_weights,
+            )
+            _model, _vertices, joints, _parents = self.cache.rest_geometry(GENDER)
+            joints = np.asarray(joints)
+            eye = (joints[23] + joints[24]) / 2.0
+            errors = []
+            for joint in (4, 5, 7, 8, 10, 11):
+                x, y = reference["joints"][str(joint)]
+                predicted = np.array([
+                    reference["eye_midpoint"][0]
+                    + (joints[joint][0] - eye[0]) * ppm,
+                    reference["eye_midpoint"][1]
+                    - (joints[joint][1] - eye[1]) * ppm,
+                ])
+                errors.append(float(np.hypot(predicted[0] - x, predicted[1] - y)))
+            return float(np.mean(errors))
+
+        plain = leg_rms(None)
+        weighted = leg_rms({
+            0: 1.2, 1: 1.2, 2: 1.2,
+            4: 2.0, 5: 2.0,
+            7: 2.5, 8: 2.5,
+            10: 1.5, 11: 1.5,
+        })
+        self.assertLess(weighted, plain - 1.0)
+
     def test_single_front_view(self):
         result = autofit.run(self.cache, GENDER, path=str(FRONT))
         self.assertTrue(result["ok"])

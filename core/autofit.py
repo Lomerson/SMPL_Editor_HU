@@ -423,6 +423,14 @@ def _fit_front(cache, gender: str, front, model_height: float):
         eye_px,
         joints,
         z_weight=3.0,
+        # Legs are the part users notice most, and they are the easiest to
+        # compromise when the whole skeleton is fitted at once.
+        joint_weights={
+            0: 1.2, 1: 1.2, 2: 1.2,
+            4: 2.0, 5: 2.0,
+            7: 2.5, 8: 2.5,
+            10: 1.5, 11: 1.5,
+        },
     )
     _model, vertices, _joints, _parents = cache.rest_geometry(gender)
     height_before = float(vertices[:, 1].max() - vertices[:, 1].min())

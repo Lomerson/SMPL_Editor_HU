@@ -13,7 +13,8 @@ from core.config import GENDERS, REFERENCE_EYE_WEIGHT, REFERENCE_IK_FULL_BODY
 def solve_reference_lengths(cache, gender: str, pixels_per_meter: float,
                             eye_midpoint, joints: dict,
                             z_weight: float = 3.0,
-                            editable_bones=None) -> dict:
+                            editable_bones=None,
+                            joint_weights: dict | None = None) -> dict:
     """Fit the 21 editable bone lengths so the model's joints land on the picture.
 
     The picture already sits on the model's eye midpoint, so every joint is
@@ -25,9 +26,18 @@ def solve_reference_lengths(cache, gender: str, pixels_per_meter: float,
     bone vector, ``L_k`` the length factor -- exactly how ``_geometry`` builds
     the joints), the constraint ``J_i - J_eye = delta_i`` is **linear** in
     ``L``, so it is one least-squares solve with a light pull towards 1.
+    ``joint_weights`` scales selected joints' 2D rows; the depth prior is not
+    weighted, so the default behavior stays unchanged when it is omitted.
     """
     if gender not in GENDERS or not cache.available(gender):
         raise FileNotFoundError(gender)
+    weights = {}
+    if joint_weights:
+        for key, value in joint_weights.items():
+            joint = int(key)
+            weight = float(value)
+            if np.isfinite(weight) and weight > 0.0:
+                weights[joint] = weight
     mpp = 1.0 / float(pixels_per_meter)
     if not np.isfinite(mpp) or mpp <= 0 or not np.isfinite(float(pixels_per_meter)):
         raise ValueError("invalid pixels_per_meter")
@@ -84,8 +94,9 @@ def solve_reference_lengths(cache, gender: str, pixels_per_meter: float,
         full = row_for(joint)
         a = full[:2] - eye_row[:2]
         b = target + eye_offset[:2]
-        rows.append(a[0]); rhs.append(b[0] * 1.0)
-        rows.append(a[1]); rhs.append(b[1] * 1.0)
+        weight = weights.get(joint, 1.0)
+        rows.append(a[0] * weight); rhs.append(b[0] * weight)
+        rows.append(a[1] * weight); rhs.append(b[1] * weight)
         # keep the joint's own depth: sum(v_kz * L_k) == sum(v_kz)
         rows.append(full[2] * z_weight)
         rhs.append(float((full[2]).sum()) * z_weight)

@@ -94,7 +94,7 @@
   <details class="panel" open><summary class="section-title">头部编辑</summary><div id="head-editor" class="segment-empty">正在读取头部参数...</div></details>
   <details class="panel"><summary class="section-title">导出</summary><div class="segment-tools export-buttons"><button id="export-glb" class="small" title="下载带 55 关节蒙皮的 T-pose GLB">GLB</button><button id="export-params" class="small" title="下载 identity 参数 JSON">参数</button><button id="export-fourview" class="small" title="下载四视图 PNG + views.json">四视图</button></div><div class="segment-tools export-buttons" id="disp-buttons"><button id="disp-pick" class="small" title="导入 Blender shape key 导出的 (N,3) .npy">导入位移</button><button id="disp-clear" class="small" disabled title="移除已导入的位移">清除位移</button></div><input id="disp-file" type="file" accept=".npy,application/octet-stream"><p class="sub" id="export-help">GLB 带 55 关节蒙皮（Blender 会得到 Armature + Vertex Groups）；四视图为完整蒙皮截图（侧视隐藏手臂并标出肩/臂截面）；导出始终是 T-pose identity，不包含当前摆姿。位移会应用到 GLB/四视图。</p></details>
   <div id="status">正在读取模型信息...</div>
-</aside><main><canvas id="viewer"></canvas><div class="floating-tools" role="toolbar" aria-label="编辑工具"><div class="tool-row"><button id="symmetry-toggle" class="tool-btn" aria-pressed="true" title="对称编辑">对称</button><button id="undo-btn" class="tool-btn" title="撤回 (Ctrl+Z)" disabled>撤回</button><button id="reset" class="tool-btn tool-wide" title="全部重置" disabled>全部重置</button><button id="logout-btn" class="tool-btn" title="退出实验" hidden>退出</button></div><div id="skin-opacity-host" class="floating-opacity" title="0 透明（只看骨架） / 1 半透明 / 2 不透明"></div></div><div class="hud">点击黄色身体关节后拖动<br>空白处拖动旋转 · 滚轮缩放</div><div id="toasts"></div></main></div>
+</aside><main><canvas id="viewer"></canvas><div class="floating-tools" role="toolbar" aria-label="编辑工具"><div class="tool-row"><button id="symmetry-toggle" class="tool-btn active" aria-pressed="true" title="对称编辑">对称</button><button id="undo-btn" class="tool-btn" title="撤回 (Ctrl+Z)" disabled>撤回</button><button id="reset" class="tool-btn tool-wide" title="全部重置" disabled>全部重置</button><button id="logout-btn" class="tool-btn" title="退出实验" hidden>退出</button></div><div id="skin-opacity-host" class="floating-opacity" title="0 透明（只看骨架） / 1 半透明 / 2 不透明"></div></div><div class="hud">点击黄色身体关节后拖动<br>空白处拖动旋转 · 滚轮缩放</div><div id="toasts"></div></main></div>
 <div id="history-drawer" class="history-drawer" aria-hidden="true"><button id="history-tab" class="history-tab" aria-expanded="false">历史</button><aside class="history-panel"><div class="history-head"><strong>操作历史</strong><button id="history-close" class="small">关闭</button></div><p class="history-hint">单击任意一步回撤/重做</p><ol id="history-list" class="history-list"></ol></aside></div>
 <script type="importmap">{"imports":{"three":"/vendor/three.module.js","three/addons/":"/vendor/addons/"}}</script>
 <script type="module">
@@ -108,7 +108,7 @@ scene.add(new THREE.HemisphereLight(0xddeaff,0x20242c,2.0)); const key=new THREE
 const grid=new THREE.GridHelper(8,16,0x4a596f,0x27303b); scene.add(grid); const axes=new THREE.AxesHelper(.45); axes.position.set(-2.5,.01,2.5); scene.add(axes);
 let meshRoot=null, skeletonRoot=null, selected=null, jointPickers=[], segmentLines=null, skeletonData=null, drag=null, selectedSegment=null, revision=0;
 let skinOpacityLevel=1;
-let symmetric=false;
+let symmetric=true;
 let undoBusy=false;
 const MESH_OPACITY=0.42;
 const EXPERIMENT_MODE=!!window.__SMPLX_EXPERIMENT__;
