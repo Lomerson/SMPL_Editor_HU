@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SMPL-X 实验管理</title>
+<style>
+:root { color-scheme: dark; font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif; }
+* { box-sizing: border-box; }
+body { margin:0; background:#111318; color:#edf0f5; }
+main { width:min(760px,100%); margin:0 auto; padding:16px; }
+header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:14px; }
+h1 { font-size:20px; margin:0; }
+h2 { font-size:15px; margin:0 0 10px; }
+p { color:#aeb7c6; font-size:13px; line-height:1.55; }
+.card { background:#1a1e25; border:1px solid #303642; border-radius:10px; padding:14px; margin:12px 0; }
+label { display:block; color:#c7d0dd; font-size:12px; margin:10px 0 5px; }
+input, button { font:inherit; }
+input { width:100%; min-height:42px; border:1px solid #414957; border-radius:6px; background:#252b35; color:#f2f5fa; padding:0 10px; }
+button { min-height:42px; border:1px solid #4f6f9e; border-radius:6px; background:#24559a; color:#fff; padding:0 14px; cursor:pointer; }
+button.secondary { background:#2b323d; border-color:#465262; }
+button.danger { background:#7a2733; border-color:#a34755; }
+button:disabled { opacity:.5; cursor:wait; }
+.row { display:flex; gap:8px; flex-wrap:wrap; align-items:end; }
+.row > * { flex:1 1 140px; }
+.status { font-family:ui-monospace,monospace; font-size:12px; color:#9fd0ff; white-space:pre-wrap; word-break:break-all; }
+.error { color:#ffabb8; min-height:18px; font-size:13px; }
+.ok { color:#9ee7b0; }
+.list { margin:8px 0 0; padding:0; list-style:none; }
+.list li { padding:7px 0; border-top:1px solid #2c333e; font-size:13px; }
+.badge { display:inline-block; padding:2px 7px; border-radius:999px; background:#2b4d35; color:#b9f3c5; font-size:11px; margin-left:6px; }
+pre { background:#101319; border:1px solid #303642; border-radius:6px; padding:10px; overflow:auto; font-size:12px; }
+.small { font-size:12px; }
+@media (max-width:520px) { main { padding:12px; } .row > * { flex-basis:100%; } }
+</style>
+</head><body><main>
+<header><h1>SMPL-X 实验管理</h1><button id="forget" class="secondary small" hidden>退出管理</button></header>
+<p>手机可直接操作。管理员 token 只保存在本标签页的内存/sessionStorage，不写入页面。</p>
+<section id="auth" class="card">
+  <h2>管理员登录</h2>
+  <label for="token">Admin token</label>
+  <input id="token" type="password" autocomplete="off" placeholder="~/.config/smplx_experiment/admin_token">
+  <div class="row" style="margin-top:12px"><button id="login">进入管理</button></div>
+  <p class="error" id="auth-error"></p>
+</section>
+<section id="panel" hidden>
+  <div class="card">
+    <h2>当前状态</h2>
+    <div id="status" class="status">读取中...</div>
+    <div class="row" style="margin-top:12px">
+      <button id="refresh" class="secondary">刷新</button>
+      <button id="kick" class="danger">踢掉当前测试者</button>
+      <button id="restart" class="danger">重启服务</button>
+    </div>
+    <p class="error" id="action-error"></p>
+    <p id="action-ok" class="ok"></p>
+  </div>
+  <div class="card">
+    <h2>生成新账号</h2>
+    <div class="row">
+      <div><label for="label">标签（如 P03）</label><input id="label" placeholder="P03"></div>
+      <div><label for="count">数量</label><input id="count" type="number" min="1" max="20" value="1"></div>
+      <button id="generate">生成</button>
+    </div>
+    <p class="small">生成后立即生效，无需重启；把用户名和访问码发给受试者。</p>
+    <pre id="generated" hidden></pre>
+    <button id="copy" class="secondary small" hidden>复制账号信息</button>
+  </div>
+  <div class="card">
+    <h2>参与者</h2>
+    <ul id="participants" class="list"></ul>
+  </div>
+</section>
+</main>
+<script>
+const $ = (id) => document.querySelector('#' + id);
+let adminToken = sessionStorage.getItem('smplx_admin_token') || '';
+let generatedText = '';
+
+function setError(message) { $('action-error').textContent = message || ''; $('auth-error').textContent = message || ''; }
+function setOk(message) { $('action-ok').textContent = message || ''; }
+function showPanel(show) {
+  $('auth').hidden = show;
+  $('panel').hidden = !show;
+  $('forget').hidden = !show;
+}
+function showAuthError(message) { $('auth-error').textContent = message || ''; }
+
+async function api(path, body) {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'X-Admin-Token': adminToken},
+    body: JSON.stringify(body || {}),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw Error(data.error || ('HTTP ' + response.status));
+  return data;
+}
+
+async function loadStatus() {
+  setError('');
+  try {
+    const data = await api('/api/admin/status');
+    const lines = [
+      '实验模式: ' + (data.enabled ? '开' : '关'),
+      '当前测试者: ' + (data.active_user || '（无人）'),
+      '会话 TTL: ' + Math.round(data.ttl_seconds || 0) + ' 秒',
+    ];
+    $('status').textContent = lines.join('\n');
+    const list = $('participants');
+    list.innerHTML = '';
+    for (const user of data.participants || []) {
+      const item = document.createElement('li');
+      item.textContent = (user.label || '未命名') + ' · ' + user.username;
+      list.appendChild(item);
+    }
+    showPanel(true);
+  } catch (error) {
+    adminToken = '';
+    sessionStorage.removeItem('smplx_admin_token');
+    showPanel(false);
+    showAuthError('token 无效或服务不可用：' + error.message);
+  }
+}
+
+async function login() {
+  adminToken = $('token').value.trim();
+  if (!adminToken) { showAuthError('请输入 admin token'); return; }
+  const button = $('login');
+  button.disabled = true;
+  try {
+    await loadStatus();
+    sessionStorage.setItem('smplx_admin_token', adminToken);
+    $('token').value = '';
+  } finally { button.disabled = false; }
+}
+
+async function run(action) {
+  setError(''); setOk('');
+  try { await action(); } catch (error) { setError(error.message); }
+}
+
+$('login').onclick = login;
+$('token').addEventListener('keydown', (event) => { if (event.key === 'Enter') login(); });
+$('forget').onclick = () => {
+  adminToken = ''; sessionStorage.removeItem('smplx_admin_token');
+  showPanel(false); $('token').value = ''; showAuthError('');
+};
+$('refresh').onclick = () => run(loadStatus);
+$('kick').onclick = () => run(async () => {
+  if (!confirm('强制释放当前测试者并清空所有编辑状态？')) return;
+  await api('/api/admin/reset');
+  setOk('已踢掉当前测试者，状态已清空。');
+  await loadStatus();
+});
+$('generate').onclick = () => run(async () => {
+  const label = $('label').value.trim();
+  const count = Math.max(1, Math.min(20, Number($('count').value) || 1));
+  const data = await api('/api/admin/generate', {label, count});
+  generatedText = (data.users || []).map(user =>
+    `${user.label || ''}\t${user.username}\t${user.token}`).join('\n');
+  $('generated').textContent = generatedText;
+  $('generated').hidden = !generatedText;
+  $('copy').hidden = !generatedText;
+  setOk('已生成 ' + (data.users || []).length + ' 个账号，立即生效。');
+  await loadStatus();
+});
+$('copy').onclick = async () => {
+  try { await navigator.clipboard.writeText(generatedText); setOk('账号信息已复制。'); }
+  catch (_error) { setError('剪贴板不可用，请手动选择复制。'); }
+};
+$('restart').onclick = () => run(async () => {
+  if (!confirm('重启服务会断开当前测试者，确定？')) return;
+  await api('/api/admin/restart');
+  setOk('正在重启，等待服务恢复...');
+  $('restart').disabled = true;
+  for (let index = 0; index < 30; index += 1) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    try {
+      const response = await fetch('/healthz', {cache: 'no-store'});
+      if (response.ok) { window.location.reload(); return; }
+    } catch (_error) {}
+  }
+  $('restart').disabled = false;
+  setError('重启后 30 秒内未恢复，请检查主机。');
+});
+
+if (adminToken) {
+  loadStatus();
+}
+</script></body></html>

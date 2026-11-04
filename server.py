@@ -6,7 +6,9 @@ import base64
 import io
 import json
 import os
+import sys
 import tempfile
+import threading
 
 import numpy as np
 from http import HTTPStatus
@@ -26,6 +28,8 @@ EXPERIMENT_HTML = HTML.replace(
     '<script>window.__SMPLX_EXPERIMENT__=true;</script></head>',
 )
 VENDOR_ROOT = (WEB_ROOT / "vendor").resolve()
+PICS_PATH = (Path(__file__).resolve().parent / "pics.zip").resolve()
+ADMIN_HTML = (WEB_ROOT / "admin.html").read_text(encoding="utf-8")
 
 def handler_factory(cache: ModelCache, access: AccessController | None = None):
     access = access or AccessController.disabled()
@@ -44,6 +48,7 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+            self.wfile.flush()
 
         def send_html(self, body: str, status=HTTPStatus.OK):
             raw = body.encode("utf-8")
@@ -53,9 +58,39 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
+            self.wfile.flush()
 
         def send_login(self, error: str = ""):
             self.send_html(access.login_page(error))
+
+        def admin_token(self, payload=None):
+            header = str(self.headers.get("X-Admin-Token", "") or "").strip()
+            if header:
+                return header
+            if isinstance(payload, dict):
+                return str(payload.get("admin_token") or payload.get("token") or "").strip()
+            return ""
+
+        def require_admin(self, payload=None) -> bool:
+            if access.admin_authorized(self.admin_token(payload)):
+                return True
+            self.send_json({"ok": False, "error": "admin token rejected"}, HTTPStatus.FORBIDDEN)
+            return False
+
+        def schedule_restart(self):
+            def restart():
+                try:
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                    os.execv(
+                        sys.executable,
+                        [sys.executable, os.path.abspath(sys.argv[0]), *sys.argv[1:]],
+                    )
+                except Exception:
+                    os._exit(1)
+            timer = threading.Timer(1.0, restart)
+            timer.daemon = True
+            timer.start()
 
         def cookie_secure(self):
             origin = str(self.headers.get("Origin", "")).lower()
@@ -102,6 +137,20 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
             self.end_headers()
             self.wfile.write(data)
 
+        def send_pics(self):
+            if not PICS_PATH.is_file():
+                self.send_json({"ok": False, "error": "pics.zip is not available"}, HTTPStatus.NOT_FOUND)
+                return
+            data = PICS_PATH.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", 'attachment; filename="pics.zip"')
+            self.send_header("Cache-Control", "no-store, max-age=0")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            self.wfile.flush()
+
         def do_GET(self):
             path = urlparse(self.path).path
             if path == "/login":
@@ -109,6 +158,9 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
                 return
             if path == "/healthz":
                 self.send_json({"ok": True})
+                return
+            if path == "/admin":
+                self.send_html(ADMIN_HTML)
                 return
             if access.enabled and not self.current_user():
                 if path in ("/", "/index.html"):
@@ -127,6 +179,9 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
                         "user": access.active_user() if access.enabled else None,
                     }
                 )
+                return
+            if path in ("/api/pics.zip", "/pics.zip"):
+                self.send_pics()
                 return
             if path.startswith("/vendor/"):
                 self.send_vendor(path)
@@ -381,18 +436,59 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
                 return
             self.send_json({"ok": True, "has_displacement": True})
 
+        def read_json(self):
+            size = int(self.headers.get("Content-Length", "0"))
+            if size <= 0:
+                return {}
+            return json.loads(self.rfile.read(size).decode("utf-8"))
+
         def _handle_admin_reset(self):
             try:
-                size = int(self.headers.get("Content-Length", "0"))
-                data = json.loads(self.rfile.read(size).decode("utf-8"))
+                data = self.read_json()
             except Exception:
                 self.send_json({"ok": False, "error": "invalid admin payload"}, HTTPStatus.BAD_REQUEST)
                 return
-            if not access.admin_reset(str(data.get("token", ""))):
-                self.send_json({"ok": False, "error": "admin token rejected"}, HTTPStatus.FORBIDDEN)
+            if not self.require_admin(data):
                 return
+            access.reset_active()
             cache.reset_session_state()
             self.send_json({"ok": True})
+
+        def _handle_admin_status(self):
+            if not self.require_admin():
+                return
+            payload = {"ok": True}
+            payload.update(access.admin_status())
+            self.send_json(payload)
+
+        def _handle_admin_generate(self):
+            try:
+                data = self.read_json()
+            except Exception:
+                self.send_json({"ok": False, "error": "invalid admin payload"}, HTTPStatus.BAD_REQUEST)
+                return
+            if not self.require_admin(data):
+                return
+            try:
+                count = max(1, min(20, int(data.get("count", 1))))
+            except Exception:
+                count = 1
+            label = str(data.get("label", "")).strip()
+            users = []
+            try:
+                for index in range(count):
+                    suffix = label if count == 1 or not label else f"{label}-{index + 1}"
+                    users.append(access.add_participant(suffix))
+            except Exception as exc:
+                self.send_json({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
+            self.send_json({"ok": True, "users": users})
+
+        def _handle_admin_restart(self):
+            if not self.require_admin():
+                return
+            self.send_json({"ok": True, "restarting": True})
+            self.schedule_restart()
 
         def _handle_login(self):
             try:
@@ -420,6 +516,15 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
 
         def do_POST(self):
             path = urlparse(self.path).path
+            if path == "/api/admin/status":
+                self._handle_admin_status()
+                return
+            if path == "/api/admin/generate":
+                self._handle_admin_generate()
+                return
+            if path == "/api/admin/restart":
+                self._handle_admin_restart()
+                return
             if path == "/api/admin/reset":
                 self._handle_admin_reset()
                 return
@@ -427,7 +532,9 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
                 self._handle_login()
                 return
             if path == "/api/logout":
-                access.logout(self.headers.get("Cookie"))
+                removed = access.logout(self.headers.get("Cookie"))
+                if removed and access.experiment_mode:
+                    cache.reset_session_state()
                 self.send_json(
                     {"ok": True},
                     headers={

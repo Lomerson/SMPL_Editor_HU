@@ -69,6 +69,33 @@ class AccessTest(unittest.TestCase):
         status, _token3, _ = self.access.login("u_alpha", "a" * 32)
         self.assertEqual(status, 200)
 
+    def test_generated_participant_persists_and_can_login(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "participants.json"
+            access = AccessController(
+                {}, enabled=True, cookie_secure=False,
+                admin_token="secret-admin", participants_path=path,
+            )
+            created = access.add_participant("P03")
+            self.assertEqual(created["label"], "P03")
+            self.assertEqual(access.login(created["username"], created["token"])[0], 200)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["users"][0]["username"], created["username"])
+
+    def test_logout_reports_whether_a_session_was_removed(self):
+        self.assertFalse(self.access.logout("smplx_session=missing"))
+        status, token, _ = self.access.login("u_alpha", "a" * 32)
+        self.assertEqual(status, 200)
+        cookie = self.access.session_cookie(token)
+        self.assertTrue(self.access.logout(cookie))
+        self.assertFalse(self.access.logout(cookie))
+
+    def test_admin_status_lists_participants_without_tokens(self):
+        status = self.access.admin_status()
+        self.assertTrue(status["enabled"])
+        self.assertEqual({item["username"] for item in status["participants"]}, {"u_alpha", "u_beta"})
+        self.assertNotIn("token", status["participants"][0])
+
     def test_admin_reset_requires_token(self):
         status, token, _ = self.access.login("u_alpha", "a" * 32)
         self.assertEqual(status, 200)

@@ -22,6 +22,7 @@ SMPL-X 一周实验托管（Tailscale Funnel）
    用 Owner 账号打开该链接并 Enable Funnel；HTTPS Certificates 只是前置条件，
    Funnel 是单独开关（管理台 DNS 页面）。
    公网地址：https://lom-cybernugget.taile0e0a9.ts.net
+   公网入口首页应返回登录页；/admin 是管理员页；/api/pics.zip 未登录应 401。
 
 4. 常驻（管理员 PowerShell）
    powershell -ExecutionPolicy Bypass -File ops\install_tasks.ps1
@@ -37,7 +38,33 @@ SMPL-X 一周实验托管（Tailscale Funnel）
    未登录 /api/* 应为 401；实验模式 /api/autofit/path 应为 403。
    第二个用户名同时登录应得到 423。
 
-6.1 强制踢掉当前测试者（管理员）
+6.1 手机管理员（生成账号/踢人/重启）
+   公网（Funnel）:
+     https://lom-cybernugget.taile0e0a9.ts.net/admin
+   或 tailnet HTTPS:
+     https://lom-cybernugget.taile0e0a9.ts.net/admin
+   在手机上输入 admin token（WSL 内）：
+     cat ~/.config/smplx_experiment/admin_token
+   管理页可以：
+     - 查看当前测试者和参与者列表
+     - 生成新账号（立即写入 participants.json，无需重启）
+     - 踢掉当前测试者（清空编辑状态）
+     - 重启服务（原地 re-exec，当前测试者会掉线）
+   注意：admin token 权限很高，不要发到公开群；建议用密码管理器/私聊传递。
+
+6.2 测试素材 pics.zip
+   文件路径固定为项目根目录：
+     /home/lomerson/MyProjects/smplx_tpose_viewer_package/pics.zip
+   把图片打包成 zip 放在这里；不需要重启服务，路由每次请求都读当前文件。
+   实验模式登录后会尝试自动下载一次到浏览器默认下载目录；侧栏“测试素材”
+   也有按钮，Chromium 下可以弹出“另存为”选择位置。空 zip 或缺失时页面会提示。
+   未登录直接访问 /api/pics.zip 返回 401。
+
+6.3 登出即重置
+   实验模式下 POST /api/logout 会立即清空所有 gender 的编辑状态和历史；
+   同一个账号重新登录也不会恢复上次的改动。
+
+6.4 强制踢掉当前测试者（命令行）
    WSL:  ./ops/kick_tester.sh
    Windows: powershell -ExecutionPolicy Bypass -File ops\kick_tester.ps1
    它会读取 ~/.config/smplx_experiment/admin_token，调用本机

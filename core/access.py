@@ -74,8 +74,10 @@ def _load_participants(path: str) -> dict[str, Participant]:
 class AccessController:
     def __init__(self, participants: dict[str, Participant] | None = None,
                  *, enabled: bool = False, ttl: float = DEFAULT_TTL,
-                 cookie_secure: bool = True, admin_token: str = ""):
+                 cookie_secure: bool = True, admin_token: str = "",
+                 participants_path: str | Path | None = None):
         self.participants = participants or {}
+        self.participants_path = Path(participants_path).expanduser() if participants_path else None
         self.enabled = bool(enabled)
         self.ttl = max(30.0, float(ttl))
         self.cookie_secure = bool(cookie_secure)
@@ -106,6 +108,7 @@ class AccessController:
             ttl=ttl,
             cookie_secure=secure,
             admin_token=os.environ.get("SMPLX_ADMIN_TOKEN", ""),
+            participants_path=path,
         )
 
     @property
@@ -167,15 +170,16 @@ class AccessController:
     def ping(self, cookie_header: str | None) -> str | None:
         return self.check(cookie_header)
 
-    def logout(self, cookie_header: str | None):
+    def logout(self, cookie_header: str | None) -> bool:
         token = self._cookie_value(cookie_header)
         if not token:
-            return
+            return False
         with self._lock:
             record = self._sessions.pop(token, None)
             if record and record[0] == self._active_user:
                 self._active_user = None
                 self._active_seen = 0.0
+            return record is not None
 
     def reset_active(self):
         with self._lock:
@@ -183,13 +187,66 @@ class AccessController:
             self._active_seen = 0.0
             self._sessions.clear()
 
+    def admin_authorized(self, token: str) -> bool:
+        return bool(self.admin_token) and hmac.compare_digest(
+            self.admin_token, str(token or "")
+        )
+
     def admin_reset(self, token: str) -> bool:
-        if not self.admin_token:
-            return False
-        if not hmac.compare_digest(self.admin_token, str(token or "")):
+        if not self.admin_authorized(token):
             return False
         self.reset_active()
         return True
+
+    def _save_participants_locked(self):
+        if self.participants_path is None:
+            return
+        payload = {
+            "users": [
+                {"username": item.username, "token": item.token, "label": item.label}
+                for item in sorted(self.participants.values(), key=lambda item: item.label or item.username)
+            ]
+        }
+        target = self.participants_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_suffix(target.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, target)
+
+    def add_participant(self, label: str = "") -> dict:
+        """Create and persist one random participant; returns its credentials."""
+        label = str(label or "").strip()
+        with self._lock:
+            while True:
+                username = "u_" + secrets.token_hex(4)
+                if username not in self.participants:
+                    break
+            token = secrets.token_urlsafe(32)
+            participant = Participant(username, token, label)
+            self.participants[username] = participant
+            self._save_participants_locked()
+            return {
+                "username": participant.username,
+                "token": participant.token,
+                "label": participant.label,
+            }
+
+    def admin_status(self) -> dict:
+        with self._lock:
+            self._expire_locked(time.time())
+            return {
+                "enabled": self.enabled,
+                "active_user": self._active_user,
+                "ttl_seconds": self.ttl,
+                "participants": [
+                    {"username": item.username, "label": item.label}
+                    for item in sorted(self.participants.values(), key=lambda item: item.label or item.username)
+                ],
+            }
 
     def active_user(self) -> str | None:
         with self._lock:
@@ -261,6 +318,7 @@ button:disabled {{ opacity:.5; cursor:wait; }}
 <button id="submit" type="submit">进入实验</button>
 </form>
 <script>
+try{{sessionStorage.removeItem('smplx_pics_downloaded');}}catch(_error){{}}
 const form=document.querySelector('#login-form'), error=document.querySelector('#login-error'), button=document.querySelector('#submit');
 form.addEventListener('submit',async (event)=>{{
   event.preventDefault(); button.disabled=true; error.textContent='';
