@@ -150,6 +150,8 @@ function frame(root){const box=new THREE.Box3().setFromObject(root), c=box.getCe
 let referenceRoot=null, referencePlane=null, referenceLayout=null, referenceURL=null;
 let referenceHidden=false, referenceStatus='', groundOffset=0;
 let referenceViews=[];
+let referenceYLocked=false;
+let referenceY={};
 let sideViewZ=0;
 let referenceTargets=null, referenceToken=0, referenceEpoch=0;
 let referenceSolvedKey=null, referenceSolveInfo=null, referenceLocked=false;
@@ -200,7 +202,7 @@ function modelEyeWorld(){
   const a=skeletonData.joints[EYE_LEFT_JOINT], b=skeletonData.joints[EYE_RIGHT_JOINT];
   return new THREE.Vector3((a[0]+b[0])/2,(a[1]+b[1])/2+groundOffset,(a[2]+b[2])/2);
 }
-function alignReference(){
+function alignReference(useEyeY=true){
   if(!referenceRoot)return null;
   const eye=modelEyeWorld();
   if(!eye)return null;
@@ -216,8 +218,10 @@ function alignReference(){
       if(view.axis==='xy'){
         const localX=(L.eye_px[0]-w/2)/ppm;
         const localY=(h/2-L.eye_px[1])/ppm;
+        const lockedY=Number.isFinite(referenceY.xy)?referenceY.xy:null;
+        const planeY=useEyeY||lockedY===null?eye.y-localY:lockedY;
         plane.rotation.set(0,0,0);
-        plane.position.set(eye.x-localX,eye.y-localY,0);
+        plane.position.set(eye.x-localX,planeY,0);
         frontTop=plane.position.y+(h/2-box[1])/ppm;
         frontBottom=plane.position.y+(h/2-(box[1]+box[3]))/ppm;
         plane.updateMatrixWorld(true);
@@ -227,7 +231,9 @@ function alignReference(){
         const worldHeight=Math.max(frontTop-frontBottom,1e-6);
         const sidePpm=Number(L.person_height_px)/worldHeight;
         if(!(sidePpm>0))continue;
-        const posY=frontTop-(h/2-box[1])/sidePpm;
+        const computedY=frontTop-(h/2-box[1])/sidePpm;
+        const lockedY=Number.isFinite(referenceY.yz)?referenceY.yz:null;
+        const posY=useEyeY||lockedY===null?computedY:lockedY;
         plane.rotation.set(0,Math.PI/2,0);
         plane.position.set(0,posY,sideViewZ);
         errors.push(0);
@@ -241,15 +247,25 @@ function alignReference(){
   const L=referenceLayout, mpp=1/L.pxPerM;
   const localX=(L.eyePx[0]-L.imgW/2)*mpp;
   const localY=(L.imgH/2-L.eyePx[1])*mpp;
-  referencePlane.position.set(eye.x-localX,eye.y-localY, 0);
+  const lockedY=Number.isFinite(referenceY.xy)?referenceY.xy:null;
+  const planeY=useEyeY||lockedY===null?eye.y-localY:lockedY;
+  referencePlane.position.set(eye.x-localX,planeY, 0);
   referenceRoot.updateMatrixWorld(true);
   const probe=referencePlane.localToWorld(new THREE.Vector3(localX,localY,0));
   return Math.hypot(probe.x-eye.x,probe.y-eye.y);
 }
 function realignReference(){
   if(!referenceRoot||(!referenceViews.length&&!referenceLayout))return;
-  const err=alignReference();
-  if(err!==null)referenceStatus=`参考图对齐误差 ${(err*1000).toFixed(4)} mm`;
+  const firstAlignment=!referenceYLocked;
+  const err=alignReference(firstAlignment);
+  if(firstAlignment&&referenceViews.length){
+    referenceY={};
+    for(const view of referenceViews){
+      if(Number.isFinite(view.plane.position.y))referenceY[view.axis]=view.plane.position.y;
+    }
+    referenceYLocked=true;
+  }
+  if(err!==null)referenceStatus=`参考图对齐误差 ${(err*1000).toFixed(4)} mm${referenceYLocked?' · Y 已锁定':''}`;
   refreshReferenceInfo();
 }
 function disposeReference(){
@@ -260,6 +276,8 @@ function disposeReference(){
   if(referenceURL){URL.revokeObjectURL(referenceURL);referenceURL=null;}
   referenceRoot=null;referencePlane=null;referenceLayout=null;
   referenceViews=[];
+  referenceYLocked=false;
+  referenceY={};
   referenceHidden=false;referenceStatus='';
   referenceTargets=null;referenceSolvedKey=null;referenceSolveInfo=null;
   setReferenceLock(false);
