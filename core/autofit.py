@@ -14,6 +14,7 @@ starting point for the manual editor, not a differentiable silhouette fit.
 """
 from __future__ import annotations
 
+import base64
 import io
 import tarfile
 import tempfile
@@ -32,6 +33,7 @@ IMAGE_SUFFIXES = {
 # The T-pose front is wide because of the outstretched arms; a side profile is
 # narrow.  The gap is large (front ~0.83, side ~0.22 in the supplied assets).
 FRONT_ASPECT_MIN = 0.52
+PREVIEW_MAX_SIDE = 1600
 
 # Conservative torso levels (fraction from the top of the figure), chosen below
 # the T-pose arms so the side hand does not pollute the chest depth.
@@ -91,7 +93,7 @@ def _collect_images(data: bytes | None, filename: str, path: str | None):
             images = _images_in_directory(source)
             if not images:
                 raise ValueError(f"目录里没有图片: {path}")
-            return images, f"目录 {path}"
+            return images, f"目录 {path}", len(images) == 1
         if source.is_file():
             payload = source.read_bytes()
             kind = _archive_kind(source.name, payload)
@@ -101,8 +103,8 @@ def _collect_images(data: bytes | None, filename: str, path: str | None):
                     images = _images_in_directory(Path(tmp))
                 if not images:
                     raise ValueError(f"压缩包里没有图片: {path}")
-                return images, f"压缩包 {path}"
-            return [(source.name, _load_rgb(payload))], f"图片 {path}"
+                return images, f"压缩包 {path}", len(images) == 1
+            return [(source.name, _load_rgb(payload))], f"图片 {path}", True
         raise ValueError(f"不支持的输入路径: {path}")
 
     if data is None:
@@ -114,8 +116,8 @@ def _collect_images(data: bytes | None, filename: str, path: str | None):
             images = _images_in_directory(Path(tmp))
         if not images:
             raise ValueError("压缩包里没有图片")
-        return images, f"压缩包 {filename or '(upload)'}"
-    return [((filename or "upload.png"), _load_rgb(data))], f"图片 {filename or '(upload)'}"
+        return images, f"压缩包 {filename or '(upload)'}", len(images) == 1
+    return [((filename or "upload.png"), _load_rgb(data))], f"图片 {filename or '(upload)'}", True
 
 
 def _foreground(rgb: np.ndarray) -> np.ndarray:
@@ -124,13 +126,59 @@ def _foreground(rgb: np.ndarray) -> np.ndarray:
     return (np.min(rgb, axis=2) < 245).astype(np.uint8)
 
 
+def _projection_split(foreground: np.ndarray, box):
+    """Last-resort split for two touching figures."""
+    x, y, w, h = box
+    crop = foreground[y:y + h, x:x + w]
+    if w <= 0 or h <= 0:
+        return None
+    for axis in (0, 1):
+        length = crop.shape[axis]
+        other = crop.shape[1 - axis]
+        if axis == 0 and w < h * 1.25:
+            continue
+        if axis == 1 and h < w * 1.25:
+            continue
+        occupied = crop.sum(axis=axis) > max(3, int(length * 0.003))
+        indices = np.where(occupied)[0]
+        if not len(indices):
+            continue
+        gaps = []
+        for left, right in zip(indices[:-1], indices[1:]):
+            if right - left > 1:
+                gaps.append((int(right - left), int(left), int(right)))
+        if not gaps:
+            continue
+        gap, left, right = max(gaps)
+        if gap < max(8, int(length * 0.05)):
+            continue
+        if axis == 0:
+            first_w, second_w = left, w - right
+            if min(first_w, second_w) < max(8, w * 0.1):
+                continue
+            return [(x, y, first_w, h), (x + right, y, w - right, h)]
+        first_h, second_h = left, h - right
+        if min(first_h, second_h) < max(8, h * 0.1):
+            continue
+        return [(x, y, w, first_h), (x, y + right, w, h - right)]
+    return None
+
+
 def _figure_bboxes(rgb: np.ndarray):
+    """Return one complete-person box, or two for a combined image.
+
+    The old version simply took the two largest connected components; a hat,
+    hand or hair clump could win that contest.  This version requires full-
+    height components, similar heights, and only then accepts a pair.
+    """
     foreground = _foreground(rgb)
     if foreground.sum() < 100:
         raise ValueError("图片前景为空")
+    ys, xs = np.where(foreground)
+    fg_height = int(ys.max() - ys.min() + 1)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
     closed = cv2.morphologyEx(foreground, cv2.MORPH_CLOSE, kernel)
-    count, labels, stats, _centroids = cv2.connectedComponentsWithStats(closed, 8)
+    count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(closed, 8)
     components = []
     total = int(foreground.sum())
     for index in range(1, count):
@@ -139,41 +187,47 @@ def _figure_bboxes(rgb: np.ndarray):
             continue
         components.append((int(area), int(x), int(y), int(w), int(h)))
     components.sort(reverse=True)
-    if len(components) >= 2:
-        first, second = components[0], components[1]
-        if second[0] >= first[0] * 0.15 and second[4] >= rgb.shape[0] * 0.25:
+
+    # Two stacked figures are each ~0.46 of the combined image height; a
+    # single figure is ~0.9.  Use the smaller threshold so vertical layouts
+    # are not rejected.
+    full = [item for item in components if item[4] >= rgb.shape[0] * 0.30]
+    if len(full) >= 2:
+        first, second = full[0], full[1]
+        height_ratio = second[4] / max(first[4], 1)
+        if (
+            second[0] >= first[0] * 0.15
+            and 0.6 <= height_ratio <= 1.6
+            and second[2] + second[4] <= rgb.shape[0] + 2
+        ):
             return [(x, y, w, h) for _, x, y, w, h in (first, second)]
-    if not components:
-        ys, xs = np.where(foreground)
-        return [(int(xs.min()), int(ys.min()), int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1))]
+        return [(full[0][1], full[0][2], full[0][3], full[0][4])]
 
-    # Fallback for touching figures: split at the largest empty projection gap
-    # on the axis that best separates them.
-    best = None
-    for axis in (0, 1):
-        occupied = (foreground.sum(axis=axis) > max(3, int(foreground.shape[axis] * 0.003)))
-        indices = np.where(occupied)[0]
-        if not len(indices):
-            continue
-        gaps = []
-        for left, right in zip(indices[:-1], indices[1:]):
-            if right - left > 1:
-                gaps.append((right - left, int(left), int(right)))
-        if not gaps:
-            continue
-        gap, left, right = max(gaps)
-        if gap > (foreground.shape[axis] * 0.06) and left > 0 and right < foreground.shape[axis] - 1:
-            best = (axis, left, right)
-            break
-    if best is None:
-        x, y, w, h = components[0][1:]
-        return [(x, y, w, h)]
-    axis, left, right = best
-    x, y, w, h = components[0][1:]
-    if axis == 0:  # columns
-        return [(x, y, left - x, h), (right, y, x + w - right, h)]
-    return [(x, y, w, left - y), (x, right, w, y + h - right)]
+    if len(full) == 1:
+        box = (full[0][1], full[0][2], full[0][3], full[0][4])
+        split = _projection_split(foreground, box)
+        return split or [box]
 
+    if components:
+        _, x, y, w, h = components[0]
+        return [(int(x), int(y), int(w), int(h))]
+    return [(int(xs.min()), int(ys.min()), int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1))]
+
+
+def _normalize_figure(cache, rgb: np.ndarray):
+    """Re-crop to the detector's person bbox, keeping preview metadata local."""
+    apd = cache._detector_module()
+    mask = apd.detect_person_mask(rgb) > 0
+    if not mask.any():
+        return None
+    ys, xs = np.where(mask)
+    x, y, w, h = int(xs.min()), int(ys.min()), int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1)
+    crop = _crop(rgb, (x, y, w, h), padding=16)
+    x0 = max(0, x - 16)
+    y0 = max(0, y - 16)
+    local_bbox = (x - x0, y - y0, w, h)
+    mask_crop = mask[y0:y0 + crop.shape[0], x0:x0 + crop.shape[1]]
+    return crop, local_bbox, float(w) / max(h, 1), mask_crop
 
 def _crop(rgb: np.ndarray, box, padding: int = 16):
     x, y, w, h = box
@@ -195,23 +249,25 @@ def _bbox_and_aspect(rgb: np.ndarray, apd):
     return (int(xs.min()), int(ys.min()), width, height), width / max(height, 1), mask
 
 
-def _split_candidates(cache, images):
-    apd = cache._detector_module()
+def _split_candidates(cache, images, allow_split: bool):
     candidates = []
     for name, rgb in images:
-        try:
-            boxes = _figure_bboxes(rgb)
-        except Exception:
-            boxes = [(0, 0, rgb.shape[1], rgb.shape[0])]
-        for box in boxes:
-            crop = _crop(rgb, box)
+        if allow_split:
             try:
-                bbox, aspect, mask = _bbox_and_aspect(crop, apd)
+                boxes = _figure_bboxes(rgb)
             except Exception:
+                boxes = [(0, 0, rgb.shape[1], rgb.shape[0])]
+        else:
+            boxes = [(0, 0, rgb.shape[1], rgb.shape[0])]
+        for index, box in enumerate(boxes):
+            rough = _crop(rgb, box)
+            normalized = _normalize_figure(cache, rough)
+            if normalized is None:
                 continue
+            crop, bbox, aspect, mask = normalized
             candidates.append(
                 {
-                    "name": name,
+                    "name": name if len(boxes) == 1 else f"{name}#{index + 1}",
                     "rgb": crop,
                     "bbox": bbox,
                     "aspect": float(aspect),
@@ -222,7 +278,6 @@ def _split_candidates(cache, images):
     if not candidates:
         raise ValueError("没有检测到可用人物")
     return candidates
-
 
 def _pick_views(candidates):
     fronts = [item for item in candidates if item["aspect"] >= FRONT_ASPECT_MIN]
@@ -238,6 +293,42 @@ def _png_bytes(rgb: np.ndarray) -> bytes:
     buffer = io.BytesIO()
     Image.fromarray(rgb).save(buffer, format="PNG")
     return buffer.getvalue()
+
+
+def _preview_data(rgb: np.ndarray):
+    height, width = rgb.shape[:2]
+    scale = min(1.0, PREVIEW_MAX_SIDE / max(width, height, 1))
+    # Keep the figure, turn the white paper background transparent so the
+    # two reference planes do not block the model.
+    alpha = np.where(np.min(rgb, axis=2) < 245, 255, 0).astype(np.uint8)
+    image = Image.fromarray(np.dstack([rgb, alpha]), mode="RGBA")
+    if scale < 1.0:
+        image = image.resize(
+            (max(1, round(width * scale)), max(1, round(height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return (
+        "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii"),
+        scale,
+        [int(image.width), int(image.height)],
+    )
+
+
+def _display_payload(rgb, bbox, person_height_px, eye_px, model_height):
+    preview, scale, size = _preview_data(rgb)
+    box = [float(value) * scale for value in bbox]
+    payload = {
+        "preview": preview,
+        "image_size": size,
+        "figure_bbox": box,
+        "person_height_px": float(person_height_px) * scale,
+        "ppm": (float(person_height_px) * scale) / max(model_height, 1e-6),
+    }
+    if eye_px is not None:
+        payload["eye_px"] = [float(value) * scale for value in eye_px]
+    return payload
 
 
 def _row_width(mask: np.ndarray, y: int) -> int:
@@ -268,11 +359,22 @@ def _fit_front(cache, gender: str, front, model_height: float):
     reference = cache.reference_eyes(_png_bytes(front["rgb"]))
     bbox = front["bbox"]
     ppm = float(bbox[3]) / max(model_height, 1e-6)
+    eye_px = [float(reference["eye_midpoint"][0]), float(reference["eye_midpoint"][1])]
+    joints = dict(reference["joints"])
+    eye_frac = (eye_px[1] - bbox[1]) / max(bbox[3], 1.0)
+    eye_source = "detector"
+    if not 0.08 <= eye_frac <= 0.22:
+        # The anime face cascade can lock onto a beret/pom-pom on a tight
+        # combined-image crop.  Fall back to the stable T-pose eye height
+        # fraction and drop the bogus eye joints from the length fit.
+        eye_px = [bbox[0] + bbox[2] / 2.0, bbox[1] + bbox[3] * 0.13]
+        joints = {key: value for key, value in joints.items() if key not in ("23", "24")}
+        eye_source = "bbox_fraction"
     fit = cache.solve_reference_lengths(
         gender,
         ppm,
-        reference["eye_midpoint"],
-        reference["joints"],
+        eye_px,
+        joints,
         z_weight=3.0,
     )
     _model, vertices, _joints, _parents = cache.rest_geometry(gender)
@@ -281,13 +383,15 @@ def _fit_front(cache, gender: str, front, model_height: float):
     if abs(global_scale - 1.0) > 0.005:
         _scale_lengths(cache, gender, global_scale)
     rms_px, max_px = cache._reference_residual(
-        gender, ppm, reference["eye_midpoint"], reference["joints"]
+        gender, ppm, eye_px, joints
     )
     _model, vertices, _joints, _parents = cache.rest_geometry(gender)
     height_after = float(vertices[:, 1].max() - vertices[:, 1].min())
     return {
         "ppm": ppm,
         "bbox": list(map(int, bbox)),
+        "eye_px": eye_px,
+        "eye_source": eye_source,
         "num_joints": int(fit["num_joints"]),
         "rms_px": float(rms_px),
         "max_px": float(max_px),
@@ -372,8 +476,8 @@ def run(cache, gender: str, *, data: bytes | None = None,
         filename: str = "", path: str | None = None) -> dict:
     if gender not in GENDERS or not cache.available(gender):
         raise FileNotFoundError(gender)
-    images, source = _collect_images(data, filename, path)
-    candidates = _split_candidates(cache, images)
+    images, source, allow_split = _collect_images(data, filename, path)
+    candidates = _split_candidates(cache, images, allow_split)
     front, side = _pick_views(candidates)
 
     # Auto-fit is one undoable operation even though it writes reset + lengths +
@@ -408,11 +512,28 @@ def run(cache, gender: str, *, data: bytes | None = None,
         if abs(worst["ratio"] - 1.0) > 0.25:
             warnings.append("侧视厚度与模型差异较大，已做保守缩放")
 
+    model_height_m = float(front_fit["height_after_m"])
+    try:
+        front_fit["display"] = _display_payload(
+            front["rgb"], front_fit["bbox"], front_fit["bbox"][3],
+            front_fit.get("eye_px"), model_height_m,
+        )
+        front_fit["preview"] = front_fit["display"]["preview"]
+        if side_fit is not None:
+            side_fit["display"] = _display_payload(
+                side["rgb"], side_fit["bbox"], side_fit["bbox"][3],
+                None, model_height_m,
+            )
+            side_fit["preview"] = side_fit["display"]["preview"]
+    except Exception as exc:
+        warnings.append(f"预览生成失败：{type(exc).__name__}: {exc}")
+
     return {
         "ok": True,
         "source": source,
         "num_input_images": len(images),
         "num_figures": len(candidates),
+        "model_height_m": model_height_m,
         "front": {key: value for key, value in front_fit.items() if key != "lengths"} | {
             "figure": {
                 "name": front["name"],

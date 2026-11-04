@@ -5,6 +5,7 @@ import os
 import shutil
 import tarfile
 import tempfile
+import zipfile
 import unittest
 from pathlib import Path
 
@@ -73,6 +74,16 @@ class AutofitTest(unittest.TestCase):
         front_aspect = front_box[2] / max(front_box[3], 1)
         side_aspect = side_box[2] / max(side_box[3], 1)
         self.assertGreater(front_aspect, side_aspect)
+        for key in ("front", "side"):
+            display = result[key].get("display")
+            self.assertIsNotNone(display)
+            self.assertTrue(display["preview"].startswith("data:image/png;base64,"))
+            self.assertEqual(len(display["image_size"]), 2)
+            self.assertGreater(display["person_height_px"], 0)
+            self.assertGreater(display["ppm"], 0)
+        self.assertIn("eye_px", result["front"]["display"])
+        self.assertNotIn("eye_px", result["side"]["display"])
+        self.assertGreater(result["model_height_m"], 1.0)
 
     def test_combined_image_layouts(self):
         result = autofit.run(self.cache, GENDER, path=str(COMBINED))
@@ -102,6 +113,45 @@ class AutofitTest(unittest.TestCase):
             archive.add(SIDE, arcname="deep/nested/two.png")
         result = autofit.run(self.cache, GENDER, path=str(tar_path))
         self._assert_two_views(result)
+
+    def test_single_image_folder_and_archive(self):
+        # A folder/archive with exactly one image is still allowed to be a
+        # combined front+side image; a single front image stays front-only.
+        combined_dir = self.root / "combined_only"
+        combined_dir.mkdir(exist_ok=True)
+        shutil.copyfile(COMBINED, combined_dir / "only.png")
+        result = autofit.run(self.cache, GENDER, path=str(combined_dir))
+        self._assert_two_views(result)
+
+        front_dir = self.root / "front_only"
+        front_dir.mkdir(exist_ok=True)
+        shutil.copyfile(FRONT, front_dir / "only.png")
+        result = autofit.run(self.cache, GENDER, path=str(front_dir))
+        self.assertEqual(result["num_figures"], 1)
+        self.assertIsNone(result["side"])
+
+        combined_zip = self.root / "combined.zip"
+        with zipfile.ZipFile(combined_zip, "w") as archive:
+            archive.write(COMBINED, "deep/only.png")
+        result = autofit.run(self.cache, GENDER, path=str(combined_zip))
+        self._assert_two_views(result)
+
+        front_tgz = self.root / "front.tgz"
+        with tarfile.open(front_tgz, "w:gz") as archive:
+            archive.add(FRONT, arcname="deep/only.png")
+        result = autofit.run(self.cache, GENDER, path=str(front_tgz))
+        self.assertEqual(result["num_figures"], 1)
+        self.assertIsNone(result["side"])
+
+    def test_combined_matches_directory_experiment(self):
+        combined = autofit.run(self.cache, GENDER, path=str(COMBINED))
+        directory = autofit.run(self.cache, GENDER, path=str(PROJECT / "ui"))
+        cf, df = combined["front"], directory["front"]
+        # Same source pixels; split must not shift the eye anchor much.
+        self.assertLess(abs(cf["eye_px"][0] - df["eye_px"][0]), 8.0)
+        self.assertLess(abs(cf["eye_px"][1] - df["eye_px"][1]), 8.0)
+        self.assertLess(abs(cf["ppm"] - df["ppm"]) / max(df["ppm"], 1e-6), 0.02)
+        self.assertLess(abs(cf["rms_px"] - df["rms_px"]), 20.0)
 
     def test_single_front_view(self):
         result = autofit.run(self.cache, GENDER, path=str(FRONT))
