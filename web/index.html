@@ -68,6 +68,8 @@
   #disp-file, #fit-file, #fit-folder { display:none; }
   .fit-actions { gap:4px; }
   .fit-actions button { flex:1 1 0; min-width:0; padding:0 3px; font-size:11px; text-align:center; white-space:nowrap; }
+  #fit-path { flex:1; min-width:0; min-height:34px; border:1px solid #414957; border-radius:6px; background:#252b35; color:#eff2f7; padding:0 8px; font-size:12px; }
+  #fit-path-run { min-height:34px; font-size:12px; }
   .step-btn:disabled { color:#697383; cursor:not-allowed; opacity:.5; }
   .skeleton-locked #seg-length-row { cursor:not-allowed; } .ref-row { display:flex; gap:8px; align-items:stretch; } #ref-pick { flex:1 1 auto; min-width:0; text-align:center; } #ref-hide, #ref-clear { flex:0 0 62px; min-width:62px; text-align:center; } #ref-file { display:none; } .ref-info { margin:8px 0 0; } @media(max-width:700px) { #app{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)} aside{padding:14px; border-right:0; border-bottom:1px solid #303642; gap:12px}.gender{grid-template-columns:repeat(3,1fr)} button{font-size:12px;text-align:center} #status{margin-top:0} }
 </style>
@@ -78,7 +80,7 @@
   <details class="panel" open><summary class="section-title">调整人体姿态</summary><div class="pose-controls"><label class="toggle"><input id="full-body-ik" type="checkbox"> <span>全身 IK</span></label></div><p class="sub">关闭时移动所选点及其子节点，父节点保持固定；开启后允许整条父链共同求解。</p></details>
   <details class="panel" open><summary class="section-title">骨段编辑</summary><div id="segment-editor" class="segment-empty">点击一条黄色骨骼连线以编辑该骨段。</div></details>
   <details class="panel" open><summary class="section-title">头部编辑</summary><div id="head-editor" class="segment-empty">正在读取头部参数...</div></details>
-  <details class="panel" open><summary class="section-title">Auto-fit v0</summary><div class="ref-row fit-actions"><button id="fit-pick" class="small">选择文件</button><button id="fit-folder-pick" class="small">选择文件夹</button><button id="fit-run" class="small" disabled>开始拟合</button></div><input id="fit-file" type="file" accept="image/*,.zip,.tar,.tgz,.gz"><input id="fit-folder" type="file" webkitdirectory multiple><p class="sub" id="fit-info">支持：单张正+侧组合图 / 文件夹 / zip / tar.gz / tgz / 单张正视图。文件名不用于判断正/侧。</p></details>
+  <details class="panel" open><summary class="section-title">Auto-fit v0</summary><div class="ref-row fit-actions"><button id="fit-pick" class="small">选择文件</button><button id="fit-folder-pick" class="small">选择文件夹</button><button id="fit-run" class="small" disabled>开始拟合</button><button id="fit-hide" class="small" disabled title="只控制参考图显示，不写入历史">隐藏图片</button></div><input id="fit-file" type="file" accept="image/*,.zip,.tar,.tgz,.gz"><input id="fit-folder" type="file" webkitdirectory multiple><p class="sub" id="fit-info">支持：单张正+侧组合图 / 文件夹 / zip / tar.gz / tgz / 单张正视图。文件名不用于判断正/侧。</p><div class="ref-row"><input id="fit-path" value="/home/lomerson/MyProjects/ui" aria-label="服务器图片/目录/压缩包路径"><button id="fit-path-run" class="small">按路径拟合</button></div></details>
   <!-- 参考图自动对齐已停用，代码保留供 auto-fit 后续参考。
   <details class="panel" open><summary class="section-title">参考图</summary><div class="ref-row"><button id="ref-pick">选择图片</button><button id="ref-hide" class="small" disabled>隐藏</button><button id="ref-clear" class="small" disabled>移除</button></div><input id="ref-file" type="file" accept="image/png,image/jpeg,image/jpg,image/webp,image/bmp,image/gif,image/tiff,image/*"><p class="sub ref-info" id="ref-info">未选择图片。上传后自动用 AnimePoseDetector 对齐双眼。</p></details>
   -->
@@ -139,6 +141,7 @@ function frame(root){const box=new THREE.Box3().setFromObject(root), c=box.getCe
 // the model's eye midpoint (SMPL-X joints 23/24).  The model is never edited.
 let referenceRoot=null, referencePlane=null, referenceLayout=null, referenceURL=null;
 let referenceHidden=false, referenceStatus='', groundOffset=0;
+let referenceViews=[];
 let referenceTargets=null, referenceToken=0, referenceEpoch=0;
 let referenceSolvedKey=null, referenceSolveInfo=null, referenceLocked=false;
 const EYE_LEFT_JOINT=23, EYE_RIGHT_JOINT=24;
@@ -168,32 +171,79 @@ function updateReferenceButtons(){
   if(hide){hide.disabled=!has;hide.classList.toggle('active',has&&referenceHidden);}
   if(clear)clear.disabled=!has;
 }
+function updateFitHideButton(){
+  const button=document.querySelector('#fit-hide');
+  if(!button)return;
+  const has=!!referenceRoot;
+  button.disabled=!has;
+  button.textContent=has&&referenceHidden?'显示图片':'隐藏图片';
+  button.classList.toggle('active',has&&referenceHidden);
+}
+function toggleFitReference(){
+  if(!referenceRoot)return;
+  referenceHidden=!referenceHidden;
+  referenceRoot.visible=!referenceHidden;
+  updateFitHideButton();
+  setStatus(referenceHidden?'参考图已隐藏':'参考图已显示');
+}
 function modelEyeWorld(){
   if(!skeletonData||!skeletonData.joints||skeletonData.joints.length<=EYE_RIGHT_JOINT)return null;
   const a=skeletonData.joints[EYE_LEFT_JOINT], b=skeletonData.joints[EYE_RIGHT_JOINT];
   return new THREE.Vector3((a[0]+b[0])/2,(a[1]+b[1])/2+groundOffset,(a[2]+b[2])/2);
 }
 function alignReference(){
-  if(!referenceRoot||!referencePlane||!referenceLayout)return null;
+  if(!referenceRoot)return null;
   const eye=modelEyeWorld();
   if(!eye)return null;
+  if(referenceViews.length){
+    let frontTop=null, frontBottom=null;
+    const errors=[];
+    const ordered=referenceViews.slice().sort((a,b)=>a.axis==='xy'?-1:(b.axis==='xy'?1:0));
+    for(const view of ordered){
+      const L=view.layout, plane=view.plane;
+      const ppm=Number(L.ppm);
+      if(!(ppm>0)||!L.image_size||!L.figure_bbox)continue;
+      const w=L.image_size[0], h=L.image_size[1], box=L.figure_bbox;
+      if(view.axis==='xy'){
+        const localX=(L.eye_px[0]-w/2)/ppm;
+        const localY=(h/2-L.eye_px[1])/ppm;
+        plane.rotation.set(0,0,0);
+        plane.position.set(eye.x-localX,eye.y-localY,0);
+        frontTop=plane.position.y+(h/2-box[1])/ppm;
+        frontBottom=plane.position.y+(h/2-(box[1]+box[3]))/ppm;
+        plane.updateMatrixWorld(true);
+        const probe=plane.localToWorld(new THREE.Vector3(localX,localY,0));
+        errors.push(Math.hypot(probe.x-eye.x,probe.y-eye.y));
+      }else if(view.axis==='yz'&&frontTop!==null){
+        const worldHeight=Math.max(frontTop-frontBottom,1e-6);
+        const sidePpm=Number(L.person_height_px)/worldHeight;
+        if(!(sidePpm>0))continue;
+        // bbox centre in the side image, mapped to the model's body centre z
+        const bboxCenterU=(box[0]+box[2]/2-w/2)/sidePpm;
+        const posY=frontTop-(h/2-box[1])/sidePpm;
+        const centerZ=(skeletonData&&skeletonData.joints&&skeletonData.joints[0])?skeletonData.joints[0][2]:0;
+        plane.rotation.set(0,Math.PI/2,0);
+        plane.position.set(0,posY,centerZ+bboxCenterU);
+        errors.push(0);
+      }
+    }
+    referenceStatus='正/侧参考图已对齐（侧视 bbox 对齐头顶/脚底）';
+    return errors.length?Math.max(...errors):null;
+  }
+  // Legacy single-plane reference (kept for the disabled reference panel).
+  if(!referencePlane||!referenceLayout)return null;
   const L=referenceLayout, mpp=1/L.pxPerM;
   const localX=(L.eyePx[0]-L.imgW/2)*mpp;
   const localY=(L.imgH/2-L.eyePx[1])*mpp;
-  // The plane keeps its XY orientation (no rotation at all); it is translated
-  // along z as well so the picture's eye midpoint and the model's eye midpoint
-  // coincide in 3D, not just in the projection.
   referencePlane.position.set(eye.x-localX,eye.y-localY, 0);
   referenceRoot.updateMatrixWorld(true);
   const probe=referencePlane.localToWorld(new THREE.Vector3(localX,localY,0));
-  // the picture is pinned to the xy plane, so only the in-plane offset can be
-  // driven to zero -- compare in xy, not in 3D (the eyes sit ~6 cm in front).
   return Math.hypot(probe.x-eye.x,probe.y-eye.y);
 }
 function realignReference(){
-  if(!referenceRoot||!referenceLayout)return;
+  if(!referenceRoot||(!referenceViews.length&&!referenceLayout))return;
   const err=alignReference();
-  if(err!==null)referenceStatus=`双眼对齐误差 ${(err*1000).toFixed(4)} mm（xy 平面内）`;
+  if(err!==null)referenceStatus=`参考图对齐误差 ${(err*1000).toFixed(4)} mm`;
   refreshReferenceInfo();
 }
 function disposeReference(){
@@ -203,15 +253,19 @@ function disposeReference(){
   }
   if(referenceURL){URL.revokeObjectURL(referenceURL);referenceURL=null;}
   referenceRoot=null;referencePlane=null;referenceLayout=null;
+  referenceViews=[];
   referenceHidden=false;referenceStatus='';
   referenceTargets=null;referenceSolvedKey=null;referenceSolveInfo=null;
   setReferenceLock(false);
+  updateFitHideButton();
 }
 function clearReference(){
   disposeReference();
   refreshReferenceInfo();
   updateReferenceButtons();
+  updateFitHideButton();
 }
+
 function setReferenceLock(locked){
   if(referenceLocked===locked)return;
   referenceLocked=locked;
@@ -322,6 +376,48 @@ async function showReferenceFile(file){
   updateReferenceButtons();
 }
 
+// ---------------------------- auto-fit reference planes ----------------------------
+function addAutoFitPlane(root, display, axis){
+  const ppm=Number(display.ppm);
+  if(!(ppm>0)||!display.preview||!display.image_size)return null;
+  const texture=new THREE.TextureLoader().load(display.preview);
+  texture.colorSpace=THREE.SRGBColorSpace;
+  texture.anisotropy=renderer.capabilities.getMaxAnisotropy();
+  const material=new THREE.MeshBasicMaterial({
+    map:texture,side:THREE.DoubleSide,depthWrite:false,
+    transparent:true,alphaTest:0.001,toneMapped:false,
+  });
+  const plane=new THREE.Mesh(
+    new THREE.PlaneGeometry(display.image_size[0]/ppm,display.image_size[1]/ppm),
+    material,
+  );
+  plane.renderOrder=-10;
+  root.add(plane);
+  referenceViews.push({plane,axis,layout:display});
+  if(axis==='xy')referencePlane=plane;
+  return plane;
+}
+function showAutoFitReference(result){
+  const front=result&&result.front&&result.front.display;
+  if(!front)return;
+  disposeReference();
+  referenceRoot=new THREE.Group();
+  scene.add(referenceRoot);
+  referenceHidden=false;
+  referenceRoot.visible=true;
+  addAutoFitPlane(referenceRoot,front,'xy');
+  const side=result.side&&result.side.display;
+  if(side)addAutoFitPlane(referenceRoot,side,'yz');
+  referenceLayout=null;
+  referenceTargets=null;
+  referenceSolvedKey=null;
+  referenceSolveInfo=null;
+  setReferenceLock(false);
+  const hide=document.querySelector('#fit-hide');
+  if(hide)hide.disabled=false;
+  updateFitHideButton();
+  realignReference();
+}
 // ---------------------------- slider template ----------------------------
 // One definition for every segment-editor slider: label, [-] slider [+] and the
 // numeric read-out.  min/max/step come from the call site (never hard-coded
@@ -678,10 +774,14 @@ function fileToBase64(file){
 }
 async function runAutofit(mode){
   if(!selected)return;
-  setStatus(mode==='folder'?'Auto-fit v0 正在读取文件夹...':'Auto-fit v0 正在分析上传...');
+  setStatus(mode==='folder'?'Auto-fit v0 正在读取文件夹...':(mode==='path'?'Auto-fit v0 正在读取服务器路径...':'Auto-fit v0 正在分析上传...'));
   try{
     let response;
-    if(mode==='folder'){
+    if(mode==='path'){
+      const path=(document.querySelector('#fit-path')?.value||'').trim();
+      if(!path)throw Error('请输入服务器图片/目录/压缩包路径');
+      response=await fetch('/api/autofit/path',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected,path})});
+    }else if(mode==='folder'){
       if(!autofitFolderFiles||!autofitFolderFiles.length)throw Error('请先选择包含正/侧视图的文件夹');
       const files=await Promise.all(autofitFolderFiles.map(async (file)=>({
         name:file.webkitRelativePath||file.name,
@@ -697,6 +797,7 @@ async function runAutofit(mode){
     if(referenceRoot)clearReference();
     selectedSegment=null;
     await load(selected,true,true);
+    showAutoFitReference(result);
     showAutofitInfo(result);
     setStatus('Auto-fit v0 完成：已应用骨长/躯干 girth，可继续粗调');
   }catch(error){setStatus('Auto-fit v0 失败：'+error.message,true);}
@@ -808,6 +909,7 @@ async function load(gender,edited=false,force=false){
     ensureOwners(gender);
     if(shouldFrame)frame(obj);
     applySkinOpacity();
+    if(referenceViews.length)realignReference();
     document.querySelector('#reset').disabled=false;
     setStatus('已加载 '+gender+'，可拖动黄色身体关节');
     // maybeSolveReference();  // legacy reference auto-alignment disabled
@@ -907,7 +1009,7 @@ const dispPick=document.querySelector('#disp-pick'), dispClear=document.querySel
 dispPick.onclick=()=>dispFile.click();
 dispFile.onchange=()=>{const file=dispFile.files&&dispFile.files[0];dispFile.value='';if(file)importDisplacement(file);};
 dispClear.onclick=async()=>{if(!selected)return;setStatus('正在清除位移...');try{const response=await fetch('/api/displacement/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender:selected})});if(!response.ok)throw Error(await response.text());await load(selected,true,true);updateDisplacementButtons(false);setStatus('已清除位移');}catch(error){setStatus('清除位移失败：'+error.message,true);}};
-const fitPick=document.querySelector('#fit-pick'), fitFolderPick=document.querySelector('#fit-folder-pick'), fitFileInput=document.querySelector('#fit-file'), fitFolderInput=document.querySelector('#fit-folder'), fitRun=document.querySelector('#fit-run');
+const fitPick=document.querySelector('#fit-pick'), fitFolderPick=document.querySelector('#fit-folder-pick'), fitFileInput=document.querySelector('#fit-file'), fitFolderInput=document.querySelector('#fit-folder'), fitRun=document.querySelector('#fit-run'), fitHide=document.querySelector('#fit-hide'), fitPathRun=document.querySelector('#fit-path-run');
 const logoutBtn=document.querySelector('#logout-btn');
 if(logoutBtn)logoutBtn.onclick=async()=>{try{await fetch('/api/logout',{method:'POST'});}catch(_error){}window.location.href='/login';};
 fitPick.onclick=()=>fitFileInput.click();
@@ -915,6 +1017,8 @@ fitFolderPick.onclick=()=>fitFolderInput.click();
 fitFileInput.onchange=()=>{const file=fitFileInput.files&&fitFileInput.files[0];fitFileInput.value='';if(!file)return;autofitFile=file;autofitFolderFiles=null;fitRun.disabled=false;document.querySelector('#fit-info').textContent='已选择文件 '+file.name+'，点击「开始拟合」';};
 fitFolderInput.onchange=()=>{const imagePattern=/\.(png|jpe?g|webp|bmp|gif|tiff?)$/i;const files=[...fitFolderInput.files].filter(file=>imagePattern.test(file.name));fitFolderInput.value='';if(!files.length){autofitFolderFiles=null;fitRun.disabled=true;document.querySelector('#fit-info').textContent='文件夹里没有图片';return;}autofitFolderFiles=files;autofitFile=null;fitRun.disabled=false;document.querySelector('#fit-info').textContent='已选择文件夹（'+files.length+' 个图片），点击「开始拟合」';};
 fitRun.onclick=()=>runAutofit(autofitFolderFiles&&autofitFolderFiles.length?'folder':'file');
+fitHide.addEventListener('click',toggleFitReference);
+if(fitPathRun)fitPathRun.onclick=()=>runAutofit('path');
 const symmetryToggle=document.querySelector('#symmetry-toggle');
 if(symmetryToggle)symmetryToggle.onclick=()=>setSymmetric(!symmetric);
 const undoBtn=document.querySelector('#undo-btn');
