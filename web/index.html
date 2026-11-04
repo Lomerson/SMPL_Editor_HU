@@ -66,7 +66,10 @@
   .export-buttons button { flex:1 1 0; min-width:0; padding:0 4px; font-size:11px; text-align:center; }
   #skin-opacity-row { grid-template-columns:44px minmax(0,1fr) 40px; }
   #disp-file, #fit-file, #fit-folder { display:none; }
-  .fit-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); grid-template-areas:"file file folder folder" "info info info info" "run run run hide"; gap:6px; align-items:stretch; }
+  .fit-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); grid-template-areas:"file file folder folder" "info info info info" "run run run hide" "side side side side"; gap:6px; align-items:stretch; }
+  .fit-grid #fit-side-x-host { grid-area:side; min-width:0; }
+  .fit-side-x .slider-field { margin:2px 0 0; }
+  .fit-side-x .slider-label { white-space:nowrap; }
   .fit-grid #fit-pick { grid-area:file; }
   .fit-grid #fit-folder-pick { grid-area:folder; }
   .fit-grid #fit-info { grid-area:info; margin:0; align-self:center; }
@@ -82,7 +85,7 @@
 <body><div id="app"><aside>
   <div><h1>SMPL-X T-pose</h1><p class="sub">选择性别模型。鼠标左键旋转，滚轮缩放，右键平移。</p></div>
   <details class="panel" open><summary class="section-title">人体模型</summary><select id="gender" aria-label="人体模型"></select></details>
-  <details class="panel" open><summary class="section-title">Auto-fit v0</summary><div class="fit-grid"><button id="fit-pick" class="small">选择文件</button><button id="fit-folder-pick" class="small">选择文件夹</button><p class="sub" id="fit-info">支持：单张正+侧组合图 / 文件夹 / zip / tar.gz / tgz / 单张正视图。文件名不用于判断正/侧。</p><button id="fit-run" class="small" disabled>开始拟合</button><button id="fit-hide" class="small" disabled title="只控制参考图显示，不写入历史">隐藏图片</button></div><input id="fit-file" type="file" accept="image/*,.zip,.tar,.tgz,.gz"><input id="fit-folder" type="file" webkitdirectory multiple></details>
+  <details class="panel" open><summary class="section-title">Auto-fit v0</summary><div class="fit-grid"><button id="fit-pick" class="small">选择文件</button><button id="fit-folder-pick" class="small">选择文件夹</button><p class="sub" id="fit-info">支持：单张正+侧组合图 / 文件夹 / zip / tar.gz / tgz / 单张正视图。文件名不用于判断正/侧。</p><button id="fit-run" class="small" disabled>开始拟合</button><button id="fit-hide" class="small" disabled title="只控制参考图显示，不写入历史">隐藏图片</button><div id="fit-side-x-host" class="fit-side-x" title="侧视参考图所在的 x 位置（米）"></div></div><input id="fit-file" type="file" accept="image/*,.zip,.tar,.tgz,.gz"><input id="fit-folder" type="file" webkitdirectory multiple></details>
   <!-- 参考图自动对齐已停用，代码保留供 auto-fit 后续参考。
   <details class="panel" open><summary class="section-title">参考图</summary><div class="ref-row"><button id="ref-pick">选择图片</button><button id="ref-hide" class="small" disabled>隐藏</button><button id="ref-clear" class="small" disabled>移除</button></div><input id="ref-file" type="file" accept="image/png,image/jpeg,image/jpg,image/webp,image/bmp,image/gif,image/tiff,image/*"><p class="sub ref-info" id="ref-info">未选择图片。上传后自动用 AnimePoseDetector 对齐双眼。</p></details>
   -->
@@ -147,6 +150,7 @@ function frame(root){const box=new THREE.Box3().setFromObject(root), c=box.getCe
 let referenceRoot=null, referencePlane=null, referenceLayout=null, referenceURL=null;
 let referenceHidden=false, referenceStatus='', groundOffset=0;
 let referenceViews=[];
+let sideViewX=0;
 let referenceTargets=null, referenceToken=0, referenceEpoch=0;
 let referenceSolvedKey=null, referenceSolveInfo=null, referenceLocked=false;
 const EYE_LEFT_JOINT=23, EYE_RIGHT_JOINT=24;
@@ -228,7 +232,7 @@ function alignReference(){
         const posY=frontTop-(h/2-box[1])/sidePpm;
         const centerZ=(skeletonData&&skeletonData.joints&&skeletonData.joints[0])?skeletonData.joints[0][2]:0;
         plane.rotation.set(0,Math.PI/2,0);
-        plane.position.set(0,posY,centerZ+bboxCenterU);
+        plane.position.set(sideViewX,posY,centerZ+bboxCenterU);
         errors.push(0);
       }
     }
@@ -401,6 +405,22 @@ function addAutoFitPlane(root, display, axis){
   referenceViews.push({plane,axis,layout:display});
   if(axis==='xy')referencePlane=plane;
   return plane;
+}
+function applySideViewX(){
+  const input=document.querySelector('#fit-side-x');
+  if(!input)return;
+  sideViewX=Number(input.value);
+  if(referenceViews.length)realignReference();
+}
+function renderFitSideX(){
+  const host=document.querySelector('#fit-side-x-host');
+  if(!host)return;
+  host.innerHTML=sliderTemplate({
+    id:'fit-side-x', label:'侧视X', min:-0.5, max:0.5, step:0.01,
+    value:sideViewX, decimals:2,
+    attrs:'aria-label="侧视参考图 X 位置（米）"',
+  });
+  wireSlider(host,{id:'fit-side-x',decimals:2,onInput:applySideViewX,onChange:applySideViewX});
 }
 function showAutoFitReference(result){
   const front=result&&result.front&&result.front.display;
@@ -1047,6 +1067,6 @@ addEventListener('keydown',(event)=>{
   event.preventDefault();
   undoLast();
 });
-async function init(){applyExperimentMode();startExperimentHeartbeat();renderSkinOpacity();const r=await fetch('/api/models');if(!r.ok)throw Error('无法读取模型信息');const data=await r.json();for(const item of data.models){const option=document.createElement('option');option.value=item.gender;option.textContent=item.label+(item.available?'':'（未安装）');option.disabled=!item.available;choices.append(option)}choices.onchange=()=>load(choices.value,true);const first=data.models.find(x=>x.available);if(first)load(first.gender,true);else setStatus('未找到可用 SMPL-X 模型文件',true)}
+async function init(){applyExperimentMode();startExperimentHeartbeat();renderSkinOpacity();renderFitSideX();const r=await fetch('/api/models');if(!r.ok)throw Error('无法读取模型信息');const data=await r.json();for(const item of data.models){const option=document.createElement('option');option.value=item.gender;option.textContent=item.label+(item.available?'':'（未安装）');option.disabled=!item.available;choices.append(option)}choices.onchange=()=>load(choices.value,true);const first=data.models.find(x=>x.available);if(first)load(first.gender,true);else setStatus('未找到可用 SMPL-X 模型文件',true)}
 init().catch(e=>setStatus(e.message,true));
 </script></body></html>
