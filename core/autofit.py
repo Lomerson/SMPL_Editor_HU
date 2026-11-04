@@ -390,6 +390,23 @@ def _model_band(vertices, y: float, half_height: float):
     return vertices[band]
 
 
+def _length_snapshot(cache, gender: str):
+    with cache.lock:
+        return {
+            str(child): float(entry.get("length", 1.0))
+            for child, entry in cache._segments(gender).items()
+        }
+
+
+def _restore_lengths(cache, gender: str, snapshot):
+    with cache.lock:
+        config = cache._segments(gender)
+        for child, value in snapshot.items():
+            if child in config:
+                config[child]["length"] = value
+        cache._invalidate_geometry(gender)
+
+
 def _scale_lengths(cache, gender: str, scale: float):
     with cache.lock:
         config = cache._segments(gender)
@@ -427,18 +444,16 @@ def _fit_front(cache, gender: str, front, model_height: float):
         # compromise when the whole skeleton is fitted at once.
         joint_weights={
             0: 1.2, 1: 1.2, 2: 1.2,
+            3: 1.2, 6: 1.2, 9: 1.2,
             4: 2.0, 5: 2.0,
             7: 2.5, 8: 2.5,
             10: 1.5, 11: 1.5,
+            12: 2.5, 16: 2.0, 17: 2.0,
         },
     )
     _model, vertices, _joints, _parents = cache.rest_geometry(gender)
     height_before = float(vertices[:, 1].max() - vertices[:, 1].min())
-    with cache.lock:
-        lengths_before = {
-            str(child): float(entry.get("length", 1.0))
-            for child, entry in cache._segments(gender).items()
-        }
+    lengths_before = _length_snapshot(cache, gender)
     rms_before, max_before = cache._reference_residual(
         gender, ppm, eye_px, joints
     )
@@ -451,12 +466,7 @@ def _fit_front(cache, gender: str, front, model_height: float):
             gender, ppm, eye_px, joints
         )
         if rms_after_scale > rms_before + 1.0:
-            with cache.lock:
-                config = cache._segments(gender)
-                for child, value in lengths_before.items():
-                    if child in config:
-                        config[child]["length"] = value
-                cache._invalidate_geometry(gender)
+            _restore_lengths(cache, gender, lengths_before)
             global_scale = 1.0
             scale_rejected = True
             rms_px, max_px = rms_before, max_before
@@ -465,7 +475,98 @@ def _fit_front(cache, gender: str, front, model_height: float):
     else:
         rms_px, max_px = rms_before, max_before
     _model, vertices, _joints, _parents = cache.rest_geometry(gender)
+    model_joints = np.asarray(_joints)
+    eye_world = (model_joints[23] + model_joints[24]) / 2.0
+
+    def image_joint(index):
+        return np.array([
+            eye_px[0] + (model_joints[index][0] - eye_world[0]) * ppm,
+            eye_px[1] - (model_joints[index][1] - eye_world[1]) * ppm,
+        ])
+
+    shoulder_width_before = None
+    shoulder_width_target = None
+    shoulder_width_corrected = False
+    rms_before_shoulder = float(rms_px)
+    if "16" in joints and "17" in joints:
+        shoulder_left = image_joint(16)
+        shoulder_right = image_joint(17)
+        shoulder_width_before = float(abs(shoulder_left[0] - shoulder_right[0]))
+        shoulder_width_target = float(abs(
+            float(joints["16"][0]) - float(joints["17"][0])
+        ))
+        if shoulder_width_target > 1.0 and abs(
+            shoulder_width_before - shoulder_width_target
+        ) > 2.0:
+            lengths_after_scale = _length_snapshot(cache, gender)
+            ratio = float(np.clip(
+                shoulder_width_target / max(shoulder_width_before, 1e-6),
+                0.90, 1.10,
+            ))
+            with cache.lock:
+                config = cache._segments(gender)
+                for child in (13, 14, 16, 17):
+                    entry = config.get(str(child))
+                    if entry is not None:
+                        entry["length"] = float(np.clip(
+                            float(entry.get("length", 1.0)) * ratio, 0.25, 4.0
+                        ))
+                cache._invalidate_geometry(gender)
+            corrected_rms, corrected_max = cache._reference_residual(
+                gender, ppm, eye_px, joints
+            )
+            _model_c, _vertices_c, corrected_joints, _parents_c = cache.rest_geometry(gender)
+            corrected_joints = np.asarray(corrected_joints)
+            corrected_width = float(abs(
+                corrected_joints[16][0] - corrected_joints[17][0]
+            ) * ppm)
+            if (
+                abs(corrected_width - shoulder_width_target)
+                < abs(shoulder_width_before - shoulder_width_target)
+                and corrected_rms <= rms_before_shoulder + 1.5
+            ):
+                rms_px, max_px = corrected_rms, corrected_max
+                shoulder_width_corrected = True
+            else:
+                _restore_lengths(cache, gender, lengths_after_scale)
+                _model_c, _vertices_c, corrected_joints, _parents_c = cache.rest_geometry(gender)
+                corrected_joints = np.asarray(corrected_joints)
+
+    _model, vertices, final_joints, _parents = cache.rest_geometry(gender)
+    final_joints = np.asarray(final_joints)
     height_after = float(vertices[:, 1].max() - vertices[:, 1].min())
+    final_eye = (final_joints[23] + final_joints[24]) / 2.0
+
+    def final_image_joint(index):
+        return np.array([
+            eye_px[0] + (final_joints[index][0] - final_eye[0]) * ppm,
+            eye_px[1] - (final_joints[index][1] - final_eye[1]) * ppm,
+        ])
+
+    shoulder_width_after = None
+    shoulder_errors = None
+    neck_error = None
+    if "16" in joints and "17" in joints:
+        left = final_image_joint(16)
+        right = final_image_joint(17)
+        shoulder_width_after = float(abs(left[0] - right[0]))
+        target_left = np.asarray(joints["16"], dtype=np.float32)
+        target_right = np.asarray(joints["17"], dtype=np.float32)
+        shoulder_errors = [
+            float(np.linalg.norm(left - target_left)),
+            float(np.linalg.norm(right - target_right)),
+        ]
+    if "12" in joints:
+        target_neck = np.asarray(joints["12"], dtype=np.float32)
+        neck_error = float(np.linalg.norm(final_image_joint(12) - target_neck))
+
+    leg_errors = []
+    for index in (4, 5, 7, 8, 10, 11):
+        if str(index) in joints:
+            target_leg = np.asarray(joints[str(index)], dtype=np.float32)
+            leg_errors.append(float(np.linalg.norm(final_image_joint(index) - target_leg)))
+    leg_mean_error = float(np.mean(leg_errors)) if leg_errors else None
+
     return {
         "ppm": ppm,
         "bbox": list(map(int, bbox)),
@@ -476,7 +577,16 @@ def _fit_front(cache, gender: str, front, model_height: float):
         "max_px": float(max_px),
         "rms_before_scale_px": float(rms_before),
         "rms_after_scale_px": float(rms_after_scale),
+        "rms_before_shoulder_correction_px": float(rms_before_shoulder),
         "scale_rejected": bool(scale_rejected),
+        "shoulder_width_before_px": shoulder_width_before,
+        "shoulder_width_after_px": shoulder_width_after,
+        "shoulder_width_target_px": shoulder_width_target,
+        "shoulder_width_corrected": bool(shoulder_width_corrected),
+        "shoulder_error_px": shoulder_errors,
+        "neck_error_px": neck_error,
+        "leg_error_px": leg_errors,
+        "leg_mean_error_px": leg_mean_error,
         "lengths": {
             str(child): float(cache._segments(gender).get(str(child), {}).get("length", 1.0))
             for child in range(1, 22)

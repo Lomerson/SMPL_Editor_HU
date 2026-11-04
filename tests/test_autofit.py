@@ -220,6 +220,36 @@ class AutofitTest(unittest.TestCase):
         })
         self.assertLess(weighted, plain - 1.0)
 
+    def test_upper_body_weights_improve_neck_and_shoulders(self):
+        result = autofit.run(self.cache, GENDER, path=str(PROJECT / "ui"))
+        front = result["front"]
+        self.assertIsNotNone(front["neck_error_px"])
+        self.assertLess(front["neck_error_px"], 15.0)
+        self.assertIsNotNone(front["shoulder_error_px"])
+        self.assertLess(max(front["shoulder_error_px"]), 22.0)
+
+    def test_leg_fit_not_regressed_by_upper_body_correction(self):
+        result = autofit.run(self.cache, GENDER, path=str(PROJECT / "ui"))
+        front = result["front"]
+        self.assertIsNotNone(front["leg_mean_error_px"])
+        self.assertLess(front["leg_mean_error_px"], 25.0)
+
+    def test_shoulder_width_is_corrected(self):
+        result = autofit.run(self.cache, GENDER, path=str(PROJECT / "ui"))
+        front = result["front"]
+        self.assertIsNotNone(front["shoulder_width_target_px"])
+        self.assertIsNotNone(front["shoulder_width_after_px"])
+        self.assertLess(
+            abs(front["shoulder_width_after_px"] - front["shoulder_width_target_px"]),
+            4.0,
+        )
+        self.assertIsInstance(front["shoulder_width_corrected"], bool)
+        if front["shoulder_width_corrected"]:
+            self.assertLessEqual(
+                front["rms_px"],
+                front["rms_before_shoulder_correction_px"] + 1.5,
+            )
+
     def test_single_front_view(self):
         result = autofit.run(self.cache, GENDER, path=str(FRONT))
         self.assertTrue(result["ok"])
