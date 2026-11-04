@@ -9,6 +9,7 @@ import zipfile
 import unittest
 from pathlib import Path
 
+import numpy as np
 from PIL import Image
 
 from core import autofit
@@ -161,6 +162,16 @@ class AutofitTest(unittest.TestCase):
         self.assertTrue(result["warnings"])
         self.assertEqual(result["applied_girth"], {})
         self.assertGreater(result["front"]["height_after_m"], 1.5)
+
+    def test_cutout_keeps_white_pixels_inside_the_outline(self):
+        rgb = np.full((200, 200, 3), 255, dtype=np.uint8)
+        rgb[40:164, 40:44] = 0
+        rgb[40:164, 156:160] = 0
+        rgb[40:44, 40:160] = 0
+        rgb[160:164, 40:160] = 0
+        alpha = autofit._silhouette_mask(rgb)
+        self.assertEqual(int(alpha[100, 100]), 255)
+        self.assertEqual(int(alpha[10, 10]), 0)
 
     def test_upload_bytes_and_applied_identity(self):
         result = autofit.run(

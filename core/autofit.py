@@ -289,18 +289,59 @@ def _pick_views(candidates):
     return front, side
 
 
+def _fill_enclosed(mask: np.ndarray) -> np.ndarray:
+    padded = np.pad(mask, 1, mode="constant", constant_values=0)
+    flood = padded.copy()
+    flood_mask = np.zeros((padded.shape[0] + 2, padded.shape[1] + 2), np.uint8)
+    cv2.floodFill(flood, flood_mask, (0, 0), 255)
+    holes = cv2.bitwise_not(flood)
+    return cv2.bitwise_or(padded, holes)[1:-1, 1:-1]
+
+
+def _silhouette_mask(rgb: np.ndarray, person_mask=None) -> np.ndarray:
+    """Return the filled character outline, preserving white interior pixels."""
+    height, width = rgb.shape[:2]
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    edges = cv2.Canny(gray, 30, 90)
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    contours, _hierarchy = cv2.findContours(
+        edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    silhouette = np.zeros((height, width), np.uint8)
+    minimum_area = max(64.0, height * width * 0.0005)
+    for contour in contours:
+        if cv2.contourArea(contour) < minimum_area:
+            continue
+        x, y, w, h = cv2.boundingRect(contour)
+        if x <= 1 or y <= 1 or x + w >= width - 1 or y + h >= height - 1:
+            continue
+        cv2.drawContours(silhouette, [contour], -1, 255, -1)
+
+    # Canny can miss faint white-on-white clothing.  The detector's person mask
+    # is a useful backup, but fill its holes too so white details stay opaque.
+    if (
+        person_mask is not None
+        and getattr(person_mask, "shape", None) == (height, width)
+        and person_mask.any()
+    ):
+        silhouette = cv2.bitwise_or(silhouette, (person_mask > 0).astype(np.uint8) * 255)
+    if not silhouette.any():
+        silhouette = _foreground(rgb) * 255
+    return _fill_enclosed(silhouette)
+
+
 def _png_bytes(rgb: np.ndarray) -> bytes:
     buffer = io.BytesIO()
     Image.fromarray(rgb).save(buffer, format="PNG")
     return buffer.getvalue()
 
 
-def _preview_data(rgb: np.ndarray):
+def _preview_data(rgb: np.ndarray, person_mask=None):
     height, width = rgb.shape[:2]
     scale = min(1.0, PREVIEW_MAX_SIDE / max(width, height, 1))
-    # Keep the figure, turn the white paper background transparent so the
-    # two reference planes do not block the model.
-    alpha = np.where(np.min(rgb, axis=2) < 245, 255, 0).astype(np.uint8)
+    # Keep the complete outer silhouette, not just non-white pixels: white
+    # clothing, pom-poms and gaps between hair strands must stay opaque.
+    alpha = _silhouette_mask(rgb, person_mask)
     image = Image.fromarray(np.dstack([rgb, alpha]), mode="RGBA")
     if scale < 1.0:
         image = image.resize(
@@ -316,8 +357,8 @@ def _preview_data(rgb: np.ndarray):
     )
 
 
-def _display_payload(rgb, bbox, person_height_px, eye_px, model_height):
-    preview, scale, size = _preview_data(rgb)
+def _display_payload(rgb, bbox, person_height_px, eye_px, model_height, person_mask=None):
+    preview, scale, size = _preview_data(rgb, person_mask)
     box = [float(value) * scale for value in bbox]
     payload = {
         "preview": preview,
@@ -516,13 +557,13 @@ def run(cache, gender: str, *, data: bytes | None = None,
     try:
         front_fit["display"] = _display_payload(
             front["rgb"], front_fit["bbox"], front_fit["bbox"][3],
-            front_fit.get("eye_px"), model_height_m,
+            front_fit.get("eye_px"), model_height_m, front["mask"],
         )
         front_fit["preview"] = front_fit["display"]["preview"]
         if side_fit is not None:
             side_fit["display"] = _display_payload(
                 side["rgb"], side_fit["bbox"], side_fit["bbox"][3],
-                None, model_height_m,
+                None, model_height_m, side["mask"],
             )
             side_fit["preview"] = side_fit["display"]["preview"]
     except Exception as exc:
