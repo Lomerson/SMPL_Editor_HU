@@ -69,7 +69,7 @@ def main():
     print(f"participants: {participants}")
     print(f"admin token : {admin_path}")
     for user in users:
-        print(f"{user['label']:>6}  {user['username']}  {user['token']}")
+        print(f"{user['label']}\n{user['username']}\n{user['token']}\n")
 
 
 if __name__ == "__main__":
