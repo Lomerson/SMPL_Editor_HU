@@ -20,6 +20,7 @@ import hmac
 import json
 import os
 import secrets
+import string
 import threading
 import time
 from dataclasses import dataclass
@@ -63,8 +64,8 @@ def _load_participants(path: str) -> dict[str, Participant]:
         label = str(entry.get("label", "")).strip()
         if not username or not token:
             raise RuntimeError("参与者必须有 username 和 token")
-        if len(token) < 16:
-            raise RuntimeError(f"{username} 的 token 太短（至少 16 字符）")
+        if len(token) < 10:
+            raise RuntimeError(f"{username} 的 token 太短（至少 10 字符）")
         if username in result:
             raise RuntimeError(f"参与者用户名重复: {username}")
         result[username] = Participant(username, token, label)
@@ -222,10 +223,13 @@ class AccessController:
         label = str(label or "").strip()
         with self._lock:
             while True:
-                username = "u_" + secrets.token_hex(4)
+                username = "u_" + secrets.token_hex(2)
                 if username not in self.participants:
                     break
-            token = secrets.token_urlsafe(32)
+            token = "".join(
+                secrets.choice(string.ascii_lowercase + string.digits)
+                for _ in range(10)
+            )
             participant = Participant(username, token, label)
             self.participants[username] = participant
             self._save_participants_locked()

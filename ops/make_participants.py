@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import secrets
+import string
 from pathlib import Path
 
 
@@ -41,8 +42,11 @@ def main():
         label = labels[index] if index < len(labels) else f"P{index + 1:02d}"
         users.append(
             {
-                "username": "u_" + secrets.token_hex(4),
-                "token": secrets.token_urlsafe(32),
+                "username": "u_" + secrets.token_hex(2),
+                "token": "".join(
+                    secrets.choice(string.ascii_lowercase + string.digits)
+                    for _ in range(10)
+                ),
                 "label": label,
             }
         )

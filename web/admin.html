@@ -157,7 +157,7 @@ $('generate').onclick = () => run(async () => {
   const count = Math.max(1, Math.min(20, Number($('count').value) || 1));
   const data = await api('/api/admin/generate', {label, count});
   generatedText = (data.users || []).map(user =>
-    `${user.label || ''}\t${user.username}\t${user.token}`).join('\n');
+    [user.label, user.username, user.token].filter(Boolean).join('\n')).join('\n\n');
   $('generated').textContent = generatedText;
   $('generated').hidden = !generatedText;
   $('copy').hidden = !generatedText;

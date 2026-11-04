@@ -78,6 +78,8 @@ class AccessTest(unittest.TestCase):
             )
             created = access.add_participant("P03")
             self.assertEqual(created["label"], "P03")
+            self.assertEqual(len(created["username"]), 6)
+            self.assertEqual(len(created["token"]), 10)
             self.assertEqual(access.login(created["username"], created["token"])[0], 200)
             saved = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(saved["users"][0]["username"], created["username"])
