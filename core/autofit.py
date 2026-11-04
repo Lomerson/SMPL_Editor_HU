@@ -357,15 +357,21 @@ def _preview_data(rgb: np.ndarray, person_mask=None):
     )
 
 
-def _display_payload(rgb, bbox, person_height_px, eye_px, model_height, person_mask=None):
+def _display_payload(rgb, bbox, person_height_px, eye_px, model_height,
+                     person_mask=None, ppm=None):
     preview, scale, size = _preview_data(rgb, person_mask)
     box = [float(value) * scale for value in bbox]
+    resolved_ppm = (
+        (float(person_height_px) * scale) / max(model_height, 1e-6)
+        if ppm is None
+        else float(ppm) * scale
+    )
     payload = {
         "preview": preview,
         "image_size": size,
         "figure_bbox": box,
         "person_height_px": float(person_height_px) * scale,
-        "ppm": (float(person_height_px) * scale) / max(model_height, 1e-6),
+        "ppm": resolved_ppm,
     }
     if eye_px is not None:
         payload["eye_px"] = [float(value) * scale for value in eye_px]
@@ -420,12 +426,36 @@ def _fit_front(cache, gender: str, front, model_height: float):
     )
     _model, vertices, _joints, _parents = cache.rest_geometry(gender)
     height_before = float(vertices[:, 1].max() - vertices[:, 1].min())
-    global_scale = float(np.clip(model_height / max(height_before, 1e-6), 0.85, 1.15))
-    if abs(global_scale - 1.0) > 0.005:
-        _scale_lengths(cache, gender, global_scale)
-    rms_px, max_px = cache._reference_residual(
+    with cache.lock:
+        lengths_before = {
+            str(child): float(entry.get("length", 1.0))
+            for child, entry in cache._segments(gender).items()
+        }
+    rms_before, max_before = cache._reference_residual(
         gender, ppm, eye_px, joints
     )
+    global_scale = float(np.clip(model_height / max(height_before, 1e-6), 0.85, 1.15))
+    scale_rejected = False
+    rms_after_scale, max_after_scale = rms_before, max_before
+    if lengths_before and abs(global_scale - 1.0) > 0.005:
+        _scale_lengths(cache, gender, global_scale)
+        rms_after_scale, max_after_scale = cache._reference_residual(
+            gender, ppm, eye_px, joints
+        )
+        if rms_after_scale > rms_before + 1.0:
+            with cache.lock:
+                config = cache._segments(gender)
+                for child, value in lengths_before.items():
+                    if child in config:
+                        config[child]["length"] = value
+                cache._invalidate_geometry(gender)
+            global_scale = 1.0
+            scale_rejected = True
+            rms_px, max_px = rms_before, max_before
+        else:
+            rms_px, max_px = rms_after_scale, max_after_scale
+    else:
+        rms_px, max_px = rms_before, max_before
     _model, vertices, _joints, _parents = cache.rest_geometry(gender)
     height_after = float(vertices[:, 1].max() - vertices[:, 1].min())
     return {
@@ -436,6 +466,9 @@ def _fit_front(cache, gender: str, front, model_height: float):
         "num_joints": int(fit["num_joints"]),
         "rms_px": float(rms_px),
         "max_px": float(max_px),
+        "rms_before_scale_px": float(rms_before),
+        "rms_after_scale_px": float(rms_after_scale),
+        "scale_rejected": bool(scale_rejected),
         "lengths": {
             str(child): float(cache._segments(gender).get(str(child), {}).get("length", 1.0))
             for child in range(1, 22)
@@ -541,6 +574,8 @@ def run(cache, gender: str, *, data: bytes | None = None,
     cache.commit_edit(gender, "Auto-fit v0", history_base)
 
     warnings = []
+    if front_fit.get("scale_rejected"):
+        warnings.append("高度缩放会降低关节拟合精度，已保留拟合骨长")
     if side is None:
         warnings.append("只检测到正视图，侧视厚度使用默认值")
     elif side_fit and abs(side_fit["height_ratio_to_front"] - 1.0) > 0.02:
@@ -558,12 +593,14 @@ def run(cache, gender: str, *, data: bytes | None = None,
         front_fit["display"] = _display_payload(
             front["rgb"], front_fit["bbox"], front_fit["bbox"][3],
             front_fit.get("eye_px"), model_height_m, front["mask"],
+            ppm=front_fit["ppm"],
         )
         front_fit["preview"] = front_fit["display"]["preview"]
         if side_fit is not None:
             side_fit["display"] = _display_payload(
                 side["rgb"], side_fit["bbox"], side_fit["bbox"][3],
                 None, model_height_m, side["mask"],
+                ppm=side_fit["ppm"],
             )
             side_fit["preview"] = side_fit["display"]["preview"]
     except Exception as exc:

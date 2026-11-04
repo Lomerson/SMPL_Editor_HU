@@ -82,6 +82,11 @@ class AutofitTest(unittest.TestCase):
             self.assertEqual(len(display["image_size"]), 2)
             self.assertGreater(display["person_height_px"], 0)
             self.assertGreater(display["ppm"], 0)
+            original_size = result[key]["image_size"]
+            scale = display["image_size"][0] / max(original_size[0], 1)
+            self.assertAlmostEqual(
+                display["ppm"], result[key]["ppm"] * scale, delta=0.05
+            )
         self.assertIn("eye_px", result["front"]["display"])
         self.assertNotIn("eye_px", result["side"]["display"])
         self.assertGreater(result["model_height_m"], 1.0)
@@ -153,6 +158,20 @@ class AutofitTest(unittest.TestCase):
         self.assertLess(abs(cf["eye_px"][1] - df["eye_px"][1]), 8.0)
         self.assertLess(abs(cf["ppm"] - df["ppm"]) / max(df["ppm"], 1e-6), 0.02)
         self.assertLess(abs(cf["rms_px"] - df["rms_px"]), 20.0)
+
+    def test_scale_rejection_keeps_better_fit(self):
+        result = autofit.run(self.cache, GENDER, path=str(FRONT))
+        front = result["front"]
+        self.assertIn("scale_rejected", front)
+        self.assertIn("rms_before_scale_px", front)
+        self.assertIn("rms_after_scale_px", front)
+        self.assertLess(front["rms_px"], 35.0)
+        if front["scale_rejected"]:
+            self.assertEqual(front["global_scale"], 1.0)
+            self.assertLessEqual(front["rms_px"], front["rms_before_scale_px"] + 1.0)
+            self.assertGreater(front["rms_after_scale_px"], front["rms_before_scale_px"])
+        else:
+            self.assertLessEqual(front["rms_px"], front["rms_after_scale_px"] + 1.0)
 
     def test_single_front_view(self):
         result = autofit.run(self.cache, GENDER, path=str(FRONT))
