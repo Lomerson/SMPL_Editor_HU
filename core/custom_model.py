@@ -48,31 +48,111 @@ class UploadedModel:
         return getattr(self.base, name)
 
     def __call__(self, body_pose=None, global_orient=None, **kwargs):
-        """Minimal forward used by the pose solver.
+        """Differentiable SMPL-X-style LBS for the uploaded rest surface.
 
-        Geometry normally goes through RestDeformer; this callable keeps
-        ``pose_joint`` working for uploaded models without touching the
-        standard model's template.
+        The pose solver needs gradients with respect to ``body_pose``; the
+        regular geometry path still uses RestDeformer, but this keeps the
+        standard editor controls working on uploaded models.
         """
         import types
         import torch
-        from core.deform import RestDeformer
+        from smplx.lbs import batch_rigid_transform, batch_rodrigues
 
-        deformer = RestDeformer(self, {})
-        vertices, joints = deformer.pose(
-            self.v_template.detach().cpu().numpy(),
-            self.rest_joints.detach().cpu().numpy(),
-            body_pose,
-            global_orient,
+        device = self.v_template.device
+        dtype = torch.float32
+        if body_pose is None:
+            body_pose = torch.zeros(1, 21 * 3, dtype=dtype, device=device)
+        if not torch.is_tensor(body_pose):
+            body_pose = torch.as_tensor(body_pose, dtype=dtype, device=device)
+        body_pose = body_pose.reshape(1, 21, 3)
+        if global_orient is None:
+            global_orient = torch.zeros(1, 3, dtype=dtype, device=device)
+        if not torch.is_tensor(global_orient):
+            global_orient = torch.as_tensor(global_orient, dtype=dtype, device=device)
+        global_orient = global_orient.reshape(1, 1, 3)
+        zeros = torch.zeros(1, 1, 3, dtype=dtype, device=device)
+        hands = torch.zeros(1, 15, 3, dtype=dtype, device=device)
+        full_pose = torch.cat(
+            [global_orient, body_pose, zeros, zeros, zeros, hands, hands], dim=1
+        ).reshape(1, -1)
+        full_pose = full_pose + self.pose_mean.to(device=device, dtype=dtype)
+        rotations = batch_rodrigues(full_pose.reshape(-1, 3)).view(1, -1, 3, 3)
+        identity = torch.eye(3, dtype=dtype, device=device)
+        pose_feature = (rotations[:, 1:] - identity).reshape(1, -1)
+        offsets = (
+            pose_feature @ self.posedirs.to(device=device, dtype=dtype)
+        ).view(1, -1, 3)
+        posed_input = self.v_template.unsqueeze(0) + offsets
+        posed_joints, transforms = batch_rigid_transform(
+            rotations, self.rest_joints.unsqueeze(0), self.parents.to(device=device)
         )
-        return types.SimpleNamespace(
-            vertices=torch.as_tensor(vertices, dtype=torch.float32, device=self.v_template.device).unsqueeze(0),
-            joints=torch.as_tensor(joints, dtype=torch.float32, device=self.v_template.device).unsqueeze(0),
+        skin = torch.matmul(
+            self.lbs_weights.to(device=device, dtype=dtype).unsqueeze(0),
+            transforms.view(1, -1, 16),
+        ).view(1, -1, 4, 4)
+        homogeneous = torch.cat(
+            [posed_input, torch.ones(1, posed_input.shape[1], 1, device=device)],
+            dim=2,
         )
+        posed = torch.matmul(skin, homogeneous.unsqueeze(-1))[:, :, :3, 0]
+        return types.SimpleNamespace(vertices=posed, joints=posed_joints)
+
+
+def _transform(points, matrix):
+    points = np.asarray(points, dtype=np.float32)
+    if matrix is None:
+        return points
+    matrix = np.asarray(matrix, dtype=np.float32)
+    if matrix.shape != (4, 4):
+        return points
+    homogeneous = np.concatenate(
+        [points, np.ones((len(points), 1), dtype=np.float32)], axis=1
+    )
+    return (homogeneous @ matrix.T)[:, :3].astype(np.float32)
+
+
+def _final_vertices(archive, base):
+    if "vertices" in archive.files:
+        return np.asarray(archive["vertices"], dtype=np.float32)
+    if "native_vertices" not in archive.files:
+        raise ValueError("模型缺少 vertices/native_vertices")
+    points = np.asarray(archive["native_vertices"], dtype=np.float32)
+    if "inherited_reference_delta" in archive.files:
+        points = points + np.asarray(
+            archive["inherited_reference_delta"], dtype=np.float32
+        )
+    points = _transform(
+        points,
+        archive["native_to_world"] if "native_to_world" in archive.files else None,
+    )
+    if "two_view_delta" in archive.files:
+        points = points + np.asarray(archive["two_view_delta"], dtype=np.float32)
+    return points.astype(np.float32)
+
+
+def _final_joints(archive):
+    if "joints" in archive.files:
+        joints = np.asarray(archive["joints"], dtype=np.float32)
+    elif "native_joints" in archive.files:
+        joints = _transform(
+            archive["native_joints"],
+            archive["native_to_world"] if "native_to_world" in archive.files else None,
+        )
+    else:
+        raise ValueError("模型缺少 joints/native_joints")
+    if joints.ndim == 2 and len(joints) >= 55:
+        joints = joints[:55]
+    return np.asarray(joints, dtype=np.float32)
 
 
 def build_uploaded_model(base, payload: bytes) -> UploadedModel:
-    """Parse and validate a fitted-model NPZ, keeping its native T-pose arrays."""
+    """Parse and validate a fitted-model NPZ.
+
+    Prefer the baked final surface (``vertices``/``joints``), which is exactly
+    what the folder's OBJ/GLB contains.  Older files without those arrays are
+    reconstructed from native vertices + inherited delta + native_to_world +
+    two_view_delta.
+    """
     try:
         archive = np.load(io.BytesIO(payload), allow_pickle=False)
     except Exception as exc:
@@ -82,17 +162,10 @@ def build_uploaded_model(base, payload: bytes) -> UploadedModel:
     if missing:
         raise ValueError("模型缺少字段: " + ", ".join(missing))
 
-    vertices_key = "native_vertices" if "native_vertices" in archive.files else "vertices"
-    joints_key = "native_joints" if "native_joints" in archive.files else "joints"
-    if vertices_key not in archive.files or joints_key not in archive.files:
-        raise ValueError("模型缺少 vertices/native_vertices 或 joints/native_joints")
-
-    vertices = np.asarray(archive[vertices_key], dtype=np.float32)
-    joints = np.asarray(archive[joints_key], dtype=np.float32)
+    vertices = _final_vertices(archive, base)
+    joints = _final_joints(archive)
     faces = np.asarray(archive["faces"], dtype=np.int64)
     weights = np.asarray(archive["skinning_weights"], dtype=np.float32)
-    if joints.ndim == 2 and len(joints) >= 55:
-        joints = joints[:55]
     expected_vertices = int(base.v_template.shape[0])
     expected_joints = int(base.parents.shape[0])
     if vertices.shape != (expected_vertices, 3):
