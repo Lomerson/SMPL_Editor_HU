@@ -9,10 +9,14 @@ SMPL-X 一周实验托管（Tailscale Funnel）
    登录只接受这里精确列出的 username/token，不会“随机输入都放行”，
    也不会把输入保存成新账号。生成器会打印每位受试者的用户名和 token。
 
-2. 启动
-   WSL 内手动：SMPLX_EXPERIMENT=1 SMPLX_ACCESS_FILE=... ./run_local.sh
-   或从 Windows 运行（PowerShell）：
-     powershell -ExecutionPolicy Bypass -File ops\start_viewer.ps1
+2. 启动（推荐）
+   WSL:
+     ./ops/start_experiment.sh
+   Windows:
+     powershell -ExecutionPolicy Bypass -File ops\start_experiment.ps1
+   启动脚本会先执行 stop_experiment.sh 初始化，再启动 WSL tmux supervisor、
+   检查旧 Windows 计划任务是否已删除、检查 Funnel，最后开启公网广播。
+   不再使用会弹出 PowerShell 窗口的 Windows 计划任务。
 
 3. 开启 Funnel（首次）
    & "D:\ForProgrammingOnly\Tailscale\tailscale.exe" funnel --bg 8766
@@ -24,9 +28,12 @@ SMPL-X 一周实验托管（Tailscale Funnel）
    公网地址：https://lom-cybernugget.taile0e0a9.ts.net
    公网入口首页应返回登录页；/admin 是管理员页；/api/pics.zip 未登录应 401。
 
-4. 常驻（管理员 PowerShell）
-   powershell -ExecutionPolicy Bypass -File ops\install_tasks.ps1
-   需要 Windows 自动登录，或使用 ONLOGON 任务；主机重启后验证 URL。
+4. 常驻/停止
+   实验模式由 WSL 内的 tmux supervisor 保活（server 崩溃后自动重启），
+   不创建 Windows 计划任务，因此不会出现周期性 PowerShell 窗口。
+   停止：
+     ./ops/stop_experiment.sh
+   它会删除旧计划任务、结束 tmux/server、重置 Serve/Funnel，但保留参与者数据。
 
 5. 电源/稳定性
    powercfg /change standby-timeout-ac 0
@@ -37,6 +44,7 @@ SMPL-X 一周实验托管（Tailscale Funnel）
    手机 4G（关闭 Tailscale）打开公网 URL，登录，跑 Workflow 1/2，下载四视图 zip。
    未登录 /api/* 应为 401；实验模式 /api/autofit/path 应为 403。
    第二个用户名同时登录应得到 423。
+   停止后再次检查：funnel/serve 都应为 No serve config，且 8766 不应有监听。
 
 6.1 手机管理员（生成账号/踢人/重启）
    公网（Funnel）:
