@@ -23,6 +23,18 @@ def invalidate(cache, gender: str):
     cache.geometry_cache.pop(gender, None)
 
 
+def _model_joints(model):
+    """Joints for the rest template, including uploaded static models."""
+    rest = getattr(model, "rest_joints", None)
+    if rest is not None:
+        if hasattr(rest, "detach"):
+            rest = rest.detach()
+        if hasattr(rest, "cpu"):
+            rest = rest.cpu()
+        return np.asarray(rest, dtype=np.float32)
+    return (model.J_regressor @ model.v_template).detach().cpu().numpy().astype(np.float32)
+
+
 def _rest_state(cache, gender: str):
     """Edited rest mesh + joints, with no pose applied.
 
@@ -39,9 +51,7 @@ def _rest_state(cache, gender: str):
 
     if not segments and not head_edit and displacement is None:
         vertices = model.v_template.detach().cpu().numpy().astype(np.float32)
-        joints = (
-            model.J_regressor @ model.v_template
-        ).detach().cpu().numpy().astype(np.float32)
+        joints = _model_joints(model)
         return model, vertices, joints, parents, None
 
     deformer = RestDeformer(model, segments)
@@ -80,7 +90,11 @@ def geometry(cache, gender: str):
     # viewer (SMPL-X's forward pass differs from ``v_template`` by ~1e-7).
     # The custom LBS matches the forward pass exactly once a pose is set, so
     # only this canonical T-pose shortcut is needed.
-    if not segments and not head_edit and displacement is None and pose_is_identity(body_pose, global_orient):
+    if (
+        not getattr(model, "is_custom", False)
+        and not segments and not head_edit and displacement is None
+        and pose_is_identity(body_pose, global_orient)
+    ):
         _model, output = cache._output(gender)
         vertices = output.vertices[0].cpu().numpy().astype(np.float32)
         joints = output.joints[0, :len(parents)].cpu().numpy().astype(np.float32)
@@ -134,7 +148,7 @@ def owners(cache, gender: str) -> bytes:
         raise FileNotFoundError(gender)
     model = cache._model(gender)
     vertices = model.v_template.detach().cpu().numpy().astype(np.float32)
-    joints = (model.J_regressor @ model.v_template).detach().cpu().numpy()[:len(model.parents)]
+    joints = _model_joints(model)[:len(model.parents)]
     parents = model.parents.cpu().numpy().astype(np.int32)
     nearest_distance = np.full(len(vertices), np.inf, dtype=np.float32)
     nearest_segment = np.zeros(len(vertices), dtype=np.uint8)

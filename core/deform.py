@@ -92,7 +92,12 @@ class RestDeformer:
     def __init__(self, model, segments):
         self.model = model
         self.vertices0 = _numpy(model.v_template)
-        self.joints0 = _numpy(model.J_regressor @ model.v_template)
+        rest_joints = getattr(model, "rest_joints", None)
+        self.joints0 = (
+            _numpy(rest_joints)
+            if rest_joints is not None
+            else _numpy(model.J_regressor @ model.v_template)
+        )
         self.parents = _numpy(model.parents, dtype=np.int64)
         self.weights = _numpy(model.lbs_weights)
         self.segments = {

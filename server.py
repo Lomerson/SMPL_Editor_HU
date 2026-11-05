@@ -559,6 +559,22 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
                     HTTPStatus.FORBIDDEN,
                 )
                 return
+            if path.startswith("/api/model/upload/"):
+                gender = path.rsplit("/", 1)[-1]
+                try:
+                    size = int(self.headers.get("Content-Length", "0"))
+                    if size <= 0 or size > 32 * 1024 * 1024:
+                        raise ValueError("模型文件大小必须在 1 B 到 32 MiB 之间")
+                    payload = self.rfile.read(size)
+                    result = cache.replace_custom_model(gender, payload)
+                    self.send_json(result)
+                except FileNotFoundError:
+                    self.send_error(HTTPStatus.NOT_FOUND, "Requested base SMPL-X gender model is not installed")
+                except ValueError as exc:
+                    self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                except Exception as exc:
+                    self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, f"{type(exc).__name__}: {exc}")
+                return
             if path.startswith("/api/autofit/upload/"):
                 self._handle_autofit_upload(path.rsplit("/", 1)[-1])
                 return
@@ -572,6 +588,9 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
                 if path == "/api/reset":
                     cache.reset(gender)
                     self.send_json({"ok": True})
+                    return
+                if path == "/api/model/switch":
+                    self.send_json(cache.switch_standard_model(gender))
                     return
                 if path == "/api/undo":
                     self.send_json(cache.undo(gender))

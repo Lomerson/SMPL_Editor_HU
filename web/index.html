@@ -21,6 +21,10 @@
   .panel:not([open]) { padding-bottom:0; }
   .brand h1 { margin:0; } select { width:100%; min-height:43px; border:1px solid #414957; border-radius:6px; background:#252b35; color:#eff2f7; padding:0 11px; font-size:14px; cursor:pointer; }
   button { border:1px solid #414957; border-radius:6px; background:#252b35; color:#eff2f7; min-height:43px; padding:0 12px; font-size:14px; text-align:left; cursor:pointer; }
+  .model-actions { display:flex; gap:8px; align-items:center; margin-top:8px; }
+  .model-actions button { flex:1 1 auto; text-align:center; }
+  #model-file { display:none; }
+  .model-note { margin:7px 0 0; color:#8f99a9; font-size:11px; }
   button:hover:not(:disabled) { border-color:#7da6ef; background:#293544; } button.active { color:#fff; background:#24559a; border-color:#70a5f3; }
   button:disabled { color:#697383; cursor:not-allowed; } #status { margin-top:auto; color:#aeb7c6; font-size:12px; line-height:1.55; }
   main { min-width:0; min-height:0; position:relative; } canvas { display:block; width:100%; height:100%; }
@@ -84,7 +88,7 @@
 </head>
 <body><div id="app"><aside>
   <div><h1>SMPL-X T-pose</h1><p class="sub">选择性别模型。鼠标左键旋转，滚轮缩放，右键平移。</p></div>
-  <details class="panel" open><summary class="section-title">人体模型</summary><select id="gender" aria-label="人体模型"></select></details>
+  <details class="panel" open><summary class="section-title">人体模型</summary><select id="gender" aria-label="人体模型"></select><div class="model-actions"><button id="model-upload" class="small">上传模型</button></div><input id="model-file" type="file" accept=".npz,application/octet-stream"><p class="model-note" id="model-note">上传 SMPL-X 拓扑的 .npz；替换后从 T-Pose 开始</p></details>
   <details class="panel" open><summary class="section-title">Auto-fit v0</summary><div class="fit-grid"><button id="fit-pick" class="small">选择文件</button><button id="fit-folder-pick" class="small">选择文件夹</button><p class="sub" id="fit-info">支持：单张正+侧组合图 / 文件夹 / zip / tar.gz / tgz / 单张正视图。文件名不用于判断正/侧。</p><button id="fit-run" class="small" disabled>开始拟合</button><button id="fit-hide" class="small" disabled title="只控制参考图显示，不写入历史">隐藏图片</button><div id="fit-side-z-host" class="fit-side-z" title="侧视参考图所在的 z 位置（米）"></div></div><input id="fit-file" type="file" accept="image/*,.zip,.tar,.tgz,.gz"><input id="fit-folder" type="file" webkitdirectory multiple></details>
   <details class="panel" id="pics-panel" hidden><summary class="section-title">测试素材</summary><button id="pics-download" class="small">下载 pics.zip</button><p class="sub" id="pics-info">登录后会自动下载测试素材；也可以点按钮重新下载并选择保存位置。</p></details>
   <!-- 参考图自动对齐已停用，代码保留供 auto-fit 后续参考。
@@ -1130,7 +1134,52 @@ addEventListener('keydown',(event)=>{
   event.preventDefault();
   undoLast();
 });
-async function init(){applyExperimentMode();startExperimentHeartbeat();renderSkinOpacity();renderFitSideZ();const r=await fetch('/api/models');if(!r.ok)throw Error('无法读取模型信息');const data=await r.json();for(const item of data.models){const option=document.createElement('option');option.value=item.gender;option.textContent=item.label+(item.available?'':'（未安装）');option.disabled=!item.available;choices.append(option)}choices.onchange=()=>load(choices.value,true);const first=data.models.find(x=>x.available);if(first)load(first.gender,true);else setStatus('未找到可用 SMPL-X 模型文件',true)}
+async function switchGender(gender){
+  if(!gender||!selected)return;
+  if(gender===selected)return;
+  const previous=selected;
+  choices.value=gender;
+  setStatus('正在替换为 '+({female:'女性',male:'男性',neutral:'中性'}[gender]||gender)+' 标准模型...');
+  try{
+    const response=await fetch('/api/model/switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gender})});
+    if(!response.ok)throw Error((await response.text()).slice(0,220));
+    const result=await response.json();
+    await load(gender,true,true);
+    setStatus('已替换为：'+result.label);
+  }catch(error){
+    choices.value=previous;
+    setStatus('切换模型失败：'+error.message,true);
+  }
+}
+async function uploadModel(file){
+  if(!selected||!file)return;
+  if(!file.name.toLowerCase().endsWith('.npz')){
+    setStatus('只能上传 .npz 模型文件',true);
+    return;
+  }
+  const button=document.querySelector('#model-upload');
+  if(button)button.disabled=true;
+  setStatus('正在上传自选模型 '+file.name+' ...');
+  try{
+    const response=await fetch('/api/model/upload/'+selected,{
+      method:'POST',
+      headers:{'Content-Type':'application/octet-stream','X-Filename':file.name},
+      body:file,
+    });
+    if(!response.ok)throw Error((await response.text()).slice(0,220));
+    const result=await response.json();
+    await load(selected,true,true);
+    setStatus('已替换为：'+result.label);
+  }catch(error){
+    setStatus('上传模型失败：'+error.message,true);
+  }finally{
+    if(button)button.disabled=false;
+  }
+}
+const modelUpload=document.querySelector('#model-upload'), modelFile=document.querySelector('#model-file');
+if(modelUpload)modelUpload.onclick=()=>modelFile.click();
+if(modelFile)modelFile.onchange=()=>{const file=modelFile.files&&modelFile.files[0];modelFile.value='';if(file)uploadModel(file);};
+async function init(){applyExperimentMode();startExperimentHeartbeat();renderSkinOpacity();renderFitSideZ();const r=await fetch('/api/models');if(!r.ok)throw Error('无法读取模型信息');const data=await r.json();for(const item of data.models){const option=document.createElement('option');option.value=item.gender;option.textContent=item.label+(item.available?'':'（未安装）');option.disabled=!item.available;choices.append(option)}choices.onchange=()=>switchGender(choices.value);const first=data.models.find(x=>x.available);if(first)load(first.gender,true);else setStatus('未找到可用 SMPL-X 模型文件',true)}
 init().catch(e=>setStatus(e.message,true));
 autoDownloadPics();
 </script></body></html>

@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import copy
 import threading
+import uuid
 from pathlib import Path
 
 import numpy as np
 
-from core import detector, export, fourview, geometry, glb
+from core import custom_model, detector, export, fourview, geometry, glb
 from core.config import DEVICE_CHOICES, GENDERS, JOINT_NAMES
 from core.deform import LENGTH_MAX, LENGTH_MIN
 from core.fitting import init as fitting_init
@@ -67,6 +68,9 @@ class ModelCache:
         self.poses = {}
         self.global_orients = {}
         self.models = {}
+        self.standard_models = {}
+        self.custom_models = {}
+        self.model_identities = {}
         self.outputs = {}
         self.segment_configs = {}
         self.segment_sequences = {}
@@ -76,21 +80,54 @@ class ModelCache:
         self._sequence = 0
         self.geometry_cache = {}
 
+    def reset_session_state(self):
+        """Drop all per-session edits/models/history (experiment logout)."""
+        with self.lock:
+            self.poses.clear()
+            self.global_orients.clear()
+            self.outputs.clear()
+            self.segment_configs.clear()
+            self.segment_sequences.clear()
+            self.head_configs.clear()
+            self.displacements.clear()
+            self.histories.clear()
+            self.geometry_cache.clear()
+            self.models.clear()
+            self.custom_models.clear()
+            self.model_identities.clear()
+            self._sequence = 0
+
     def source(self, gender: str) -> Path:
         return self.model_dir / f"SMPLX_{gender.upper()}.npz"
 
     def available(self, gender: str) -> bool:
+        identity = self.model_identities.get(gender, "standard")
+        if identity.startswith("custom:"):
+            return identity.split(":", 1)[1] in self.custom_models
         return self.source(gender).is_file()
 
-    def _model(self, gender: str):
-        if gender not in self.models:
+    def _standard_model(self, gender: str):
+        if gender not in self.standard_models:
             import smplx
             model = smplx.create(
                 str(self.source(gender)), model_type="smplx", gender=gender,
                 use_pca=False, flat_hand_mean=True, batch_size=1,
             )
-            self.models[gender] = self._place_model(model)
-        return self.models[gender]
+            self.standard_models[gender] = self._place_model(model)
+        return self.standard_models[gender]
+
+    def _model(self, gender: str):
+        identity = self.model_identities.get(gender, "standard")
+        if identity.startswith("custom:"):
+            token = identity.split(":", 1)[1]
+            model = self.custom_models.get(token)
+            if model is not None:
+                self.models[gender] = model
+                return model
+            self.model_identities[gender] = "standard"
+        model = self._standard_model(gender)
+        self.models[gender] = model
+        return model
 
     def _place_model(self, model):
         """Move a newly created model onto the selected device.
@@ -111,7 +148,7 @@ class ModelCache:
             )
             # Anything already cached has to come back with us, otherwise a CUDA
             # pose tensor would meet a CPU model on the next request.
-            for cached in self.models.values():
+            for cached in list(self.models.values()) + list(self.standard_models.values()):
                 try:
                     cached.to("cpu")
                 except Exception:
@@ -145,9 +182,19 @@ class ModelCache:
 
     def _output(self, gender: str):
         import torch
-        if gender in self.outputs:
-            return self._model(gender), self.outputs[gender]
         model = self._model(gender)
+        if getattr(model, "is_custom", False):
+            # Static uploaded models have no standard SMPL-X forward pass.
+            # Geometry uses rest_joints / RestDeformer for them; this output is
+            # only a T-pose fallback for fit and metadata consumers.
+            import types
+            output = types.SimpleNamespace(
+                vertices=model.v_template.unsqueeze(0),
+                joints=model.rest_joints.unsqueeze(0),
+            )
+            return model, output
+        if gender in self.outputs:
+            return model, self.outputs[gender]
         with torch.no_grad():
             output = model(
                 body_pose=self._pose(gender, model),
@@ -168,6 +215,7 @@ class ModelCache:
         orient = self.global_orients.get(gender)
         displacement = self.displacements.get(gender)
         return {
+            "model": self.model_identities.get(gender, "standard"),
             "segments": copy.deepcopy(self.segment_configs.get(gender, {})),
             "sequences": dict(self.segment_sequences.get(gender, {})),
             "head": copy.deepcopy(self.head_configs.get(gender, {})),
@@ -177,6 +225,11 @@ class ModelCache:
         }
 
     def _restore_locked(self, gender: str, snapshot):
+        identity = snapshot.get("model", "standard")
+        if identity.startswith("custom:") and identity.split(":", 1)[1] not in self.custom_models:
+            identity = "standard"
+        self.model_identities[gender] = identity
+        self.models.pop(gender, None)
         if snapshot["segments"]:
             self.segment_configs[gender] = copy.deepcopy(snapshot["segments"])
         else:
@@ -206,6 +259,8 @@ class ModelCache:
 
     def _same_snapshot(self, left, right) -> bool:
         import torch
+        if left.get("model") != right.get("model"):
+            return False
         for key in ("segments", "sequences", "head"):
             if left[key] != right[key]:
                 return False
@@ -264,9 +319,10 @@ class ModelCache:
         self._ensure_history_locked(gender)
         return self._snapshot_locked(gender)
 
-    def _history_commit_locked(self, gender: str, label: str, base):
+    def _history_commit_locked(self, gender: str, label: str, base,
+                               force: bool = False):
         current = self._snapshot_locked(gender)
-        if self._same_snapshot(base, current):
+        if not force and self._same_snapshot(base, current):
             return
         history = self._ensure_history_locked(gender)
         index = self._history_index_locked(history)
@@ -285,9 +341,9 @@ class ModelCache:
         with self.lock:
             return self._history_begin_locked(gender)
 
-    def commit_edit(self, gender: str, label: str, base):
+    def commit_edit(self, gender: str, label: str, base, force: bool = False):
         with self.lock:
-            self._history_commit_locked(gender, label, base)
+            self._history_commit_locked(gender, label, base, force=force)
 
     def rollback_edit(self, gender: str, base):
         with self.lock:
@@ -602,43 +658,72 @@ class ModelCache:
                     gender, self._segment_label(gender, child, symmetric, reset=True), base
                 )
 
+    def _reset_state_locked(self, gender: str):
+        model = self._model(gender)
+        import torch
+        self.poses[gender] = torch.zeros(
+            (1, model.NUM_BODY_JOINTS * 3), dtype=torch.float32, device=self.device
+        )
+        self.global_orients.pop(gender, None)
+        self.segment_configs.pop(gender, None)
+        self.segment_sequences.pop(gender, None)
+        self.head_configs.pop(gender, None)
+        self.displacements.pop(gender, None)
+        self.outputs.pop(gender, None)
+        self._invalidate_geometry(gender)
+
     def reset(self, gender: str, record: bool = True):
         if gender not in GENDERS or not self.available(gender):
             raise FileNotFoundError(gender)
         with self.lock:
             base = self._history_begin_locked(gender) if record else None
-            model = self._model(gender)
-            import torch
-            self.poses[gender] = torch.zeros(
-                (1, model.NUM_BODY_JOINTS * 3), dtype=torch.float32, device=self.device
-            )
-            self.global_orients.pop(gender, None)
-            self.segment_configs.pop(gender, None)
-            self.segment_sequences.pop(gender, None)
-            self.head_configs.pop(gender, None)
-            self.displacements.pop(gender, None)
-            self.outputs.pop(gender, None)
-            self._invalidate_geometry(gender)
+            self._reset_state_locked(gender)
             if record:
                 self._history_commit_locked(gender, "重置", base)
 
-    def reset_session_state(self):
-        """Clear every gender's identity/history for a new participant.
-
-        Unlike :meth:`reset` this is not a history entry: the next participant
-        must not be able to undo back into the previous participant's edits.
-        """
+    def replace_custom_model(self, gender: str, payload: bytes,
+                             record: bool = True) -> dict:
+        """Replace the current gender model with a static uploaded NPZ."""
+        if gender not in GENDERS:
+            raise FileNotFoundError(gender)
+        base_model = self._standard_model(gender)
+        uploaded = custom_model.build_uploaded_model(base_model, payload)
         with self.lock:
-            for gender in GENDERS:
-                self.poses.pop(gender, None)
-                self.global_orients.pop(gender, None)
-                self.segment_configs.pop(gender, None)
-                self.segment_sequences.pop(gender, None)
-                self.head_configs.pop(gender, None)
-                self.displacements.pop(gender, None)
-                self.histories.pop(gender, None)
-                self.outputs.pop(gender, None)
-                self.geometry_cache.pop(gender, None)
+            base = self._history_begin_locked(gender) if record else None
+            token = uuid.uuid4().hex
+            self.custom_models[token] = uploaded
+            self.model_identities[gender] = f"custom:{token}"
+            self.models[gender] = uploaded
+            self._reset_state_locked(gender)
+            label = "替换为：自选模型"
+            if record:
+                self._history_commit_locked(gender, label, base, force=True)
+        return {
+            "ok": True,
+            "gender": gender,
+            "label": label,
+            "history": self.history_state(gender),
+        }
+
+    def switch_standard_model(self, gender: str, record: bool = True) -> dict:
+        """Restore a gender's local standard model and discard its edits."""
+        if gender not in GENDERS:
+            raise FileNotFoundError(gender)
+        with self.lock:
+            base = self._history_begin_locked(gender) if record else None
+            self.model_identities[gender] = "standard"
+            self.models.pop(gender, None)
+            self._standard_model(gender)
+            self._reset_state_locked(gender)
+            label = f"替换为：{GENDERS[gender]}"
+            if record:
+                self._history_commit_locked(gender, label, base, force=True)
+        return {
+            "ok": True,
+            "gender": gender,
+            "label": label,
+            "history": self.history_state(gender),
+        }
 
     def pose_joint(self, gender: str, joint: int, target: list[float], full_body: bool,
                    iterations: int | None = None, symmetric: bool = False,
