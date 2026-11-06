@@ -261,6 +261,7 @@ function alignReference(useEyeY=true){
     const errors=[];
     const ordered=referenceViews.slice().sort((a,b)=>a.axis==='xy'?-1:(b.axis==='xy'?1:0));
     for(const view of ordered){
+      if(view.axis==='quad')continue;
       const L=view.layout, plane=view.plane;
       const ppm=Number(L.ppm);
       if(!(ppm>0)||!L.image_size||!L.figure_bbox)continue;
@@ -306,6 +307,12 @@ function alignReference(useEyeY=true){
 }
 function realignReference(){
   if(!referenceRoot||(!referenceViews.length&&!referenceLayout))return;
+  if(referenceViews.length&&referenceViews.every(view=>view.axis==='quad')){
+    referenceRoot.position.set(0,groundOffset,0);
+    referenceStatus='参考图已对齐';
+    refreshReferenceInfo();
+    return;
+  }
   const firstAlignment=!referenceYLocked;
   const err=alignReference(firstAlignment);
   if(firstAlignment&&referenceViews.length){
@@ -487,6 +494,25 @@ function renderFitSideZ(){
   });
   wireSlider(host,{id:'fit-side-z',decimals:2,onInput:applySideViewZ,onChange:applySideViewZ});
 }
+function addAutoFitQuad(root, display){
+  if(!display.quad||display.quad.length!==4)return null;
+  const geometry=new THREE.BufferGeometry();
+  geometry.setAttribute('position',new THREE.Float32BufferAttribute(display.quad.flat(),3));
+  geometry.setAttribute('uv',new THREE.Float32BufferAttribute([0,1,1,1,0,0,1,0],2));
+  geometry.setIndex([0,1,2,2,1,3]);
+  const texture=new THREE.TextureLoader().load(display.preview);
+  texture.colorSpace=THREE.SRGBColorSpace;
+  texture.anisotropy=renderer.capabilities.getMaxAnisotropy();
+  const material=new THREE.MeshBasicMaterial({
+    map:texture,side:THREE.DoubleSide,depthWrite:false,
+    transparent:true,alphaTest:0.001,toneMapped:false,
+  });
+  const mesh=new THREE.Mesh(geometry,material);
+  mesh.renderOrder=-10;
+  root.add(mesh);
+  referenceViews.push({plane:mesh,axis:'quad',layout:display});
+  return mesh;
+}
 function showAutoFitReference(result){
   const front=result&&result.front&&result.front.display;
   if(!front)return;
@@ -495,9 +521,17 @@ function showAutoFitReference(result){
   scene.add(referenceRoot);
   referenceHidden=false;
   referenceRoot.visible=true;
-  addAutoFitPlane(referenceRoot,front,'xy');
   const side=result.side&&result.side.display;
-  if(side)addAutoFitPlane(referenceRoot,side,'yz');
+  const quadMode=!!front.quad;
+  if(quadMode){
+    addAutoFitQuad(referenceRoot,front);
+    if(side&&side.quad)addAutoFitQuad(referenceRoot,side);
+    referenceRoot.position.set(0,groundOffset,0);
+  }else{
+    referenceRoot.position.set(0,0,0);
+    addAutoFitPlane(referenceRoot,front,'xy');
+    if(side)addAutoFitPlane(referenceRoot,side,'yz');
+  }
   referenceLayout=null;
   referenceTargets=null;
   referenceSolvedKey=null;
@@ -842,6 +876,10 @@ function showAutofitInfo(result){
   const host=document.querySelector('#fit-info');
   if(!host)return;
   const front=result.front||{};
+  if(front.display&&front.display.quad){
+    host.textContent='参考图已对齐';
+    return;
+  }
   const bits=[];
   bits.push(`输入：${result.source||'?'}（${result.num_figures||0} 个视图）`);
   if(front.bbox)bits.push(`正视 ${front.bbox[2]}×${front.bbox[3]} px · ${Number(front.ppm).toFixed(0)} px/m · 残差 ${Number(front.rms_px).toFixed(1)} px`);
@@ -889,7 +927,7 @@ async function runAutofit(mode){
     await load(selected,true,true);
     showAutoFitReference(result);
     showAutofitInfo(result);
-    setStatus('Auto-fit v0 完成：已应用骨长/躯干 girth，可继续粗调');
+    setStatus('参考图已对齐，可继续粗调');
   }catch(error){setStatus('Auto-fit v0 失败：'+error.message,true);}
 }
 async function importDisplacement(file){

@@ -16,7 +16,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from core import autofit
+from core import autofit, experiment_assets
 from core.access import AccessController
 from core.config import DEVICE_CHOICES, GENDERS
 from core.model import ModelCache, resolve_device
@@ -376,15 +376,23 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
                         target = root / relative
                         target.parent.mkdir(parents=True, exist_ok=True)
                         target.write_bytes(raw)
+                    if access.experiment_mode:
+                        shortcut = experiment_assets.try_apply(cache, gender, path=str(root))
+                        if shortcut is not None:
+                            self.send_json(shortcut)
+                            return
                     result = autofit.run(cache, gender, path=str(root))
                     result["source"] = "文件夹（上传）"
                 self.send_json(result)
             except FileNotFoundError:
                 self.send_error(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
             except ValueError as exc:
-                self.send_error(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc))
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.UNPROCESSABLE_ENTITY)
             except Exception as exc:
-                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, f"{type(exc).__name__}: {exc}")
+                self.send_json(
+                    {"ok": False, "error": f"{type(exc).__name__}: {exc}"},
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
 
         def _handle_autofit_upload(self, gender):
             """Run auto-fit on a raw image/zip/tar upload."""
@@ -401,15 +409,25 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
             payload = self.rfile.read(size)
             filename = self.headers.get("X-Filename", "upload")
             try:
+                if access.experiment_mode:
+                    shortcut = experiment_assets.try_apply(
+                        cache, gender, data=payload, filename=filename
+                    )
+                    if shortcut is not None:
+                        self.send_json(shortcut)
+                        return
                 result = autofit.run(cache, gender, data=payload, filename=filename)
             except FileNotFoundError:
                 self.send_error(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
                 return
             except ValueError as exc:
-                self.send_error(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc))
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.UNPROCESSABLE_ENTITY)
                 return
             except Exception as exc:
-                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, f"{type(exc).__name__}: {exc}")
+                self.send_json(
+                    {"ok": False, "error": f"{type(exc).__name__}: {exc}"},
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
                 return
             self.send_json(result)
 
