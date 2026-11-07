@@ -9,6 +9,8 @@ PORT="${SMPLX_PORT:-8766}"
 TAILSCALE="${TAILSCALE_EXE:-/mnt/d/ForProgrammingOnly/Tailscale/tailscale.exe}"
 LOG="${STATE_DIR}/server.log"
 SESSION="smplx-expt"
+MAX_ACTIVE="${SMPLX_MAX_ACTIVE:-5}"
+TORCH_THREADS="${SMPLX_TORCH_THREADS:-4}"
 
 cd "$PROJECT_DIR"
 echo "[start] step 1/6: clean previous experiment"
@@ -32,7 +34,7 @@ echo "[start] step 3/6: start WSL viewer + supervisor (no Windows task)"
 # The loop is the WSL-side keepalive. It survives a server crash; the
 # supervisor itself is stopped by stop_experiment.sh.
 tmux new-session -d -s "$SESSION" \
-  "cd '$PROJECT_DIR' && export SMPLX_EXPERIMENT=1 SMPLX_ACCESS_FILE='${STATE_DIR}/participants.json' SMPLX_COOKIE_SECURE=1 SMPLX_ADMIN_TOKEN=\"\$(cat '${STATE_DIR}/admin_token')\" SMPLX_BIND_HOST=127.0.0.1 SMPLX_PORT=${PORT}; while true; do ./run_local.sh >>'${LOG}' 2>&1; echo \"[supervisor] server exited at \$(date -Is); restarting\" >>'${LOG}'; sleep 2; done"
+  "cd '$PROJECT_DIR' && export SMPLX_EXPERIMENT=1 SMPLX_ACCESS_FILE='${STATE_DIR}/participants.json' SMPLX_COOKIE_SECURE=1 SMPLX_ADMIN_TOKEN=\"\$(cat '${STATE_DIR}/admin_token')\" SMPLX_BIND_HOST=127.0.0.1 SMPLX_PORT=${PORT} SMPLX_MAX_ACTIVE=${MAX_ACTIVE} SMPLX_TORCH_THREADS=${TORCH_THREADS} SMPLX_HTTP_KEEPALIVE=1 SMPLX_GZIP=1 SMPLX_MAX_CONCURRENT_AUTOFIT=1; while true; do ./run_local.sh >>'${LOG}' 2>&1; echo \"[supervisor] server exited at \$(date -Is); restarting\" >>'${LOG}'; sleep 2; done"
 for _ in $(seq 1 40); do
   if curl -fsS --max-time 2 "http://127.0.0.1:${PORT}/healthz" >/dev/null 2>&1; then
     break

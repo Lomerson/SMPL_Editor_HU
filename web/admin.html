@@ -48,7 +48,7 @@ pre { background:#101319; border:1px solid #303642; border-radius:6px; padding:1
     <div id="status" class="status">读取中...</div>
     <div class="row" style="margin-top:12px">
       <button id="refresh" class="secondary">刷新</button>
-      <button id="kick" class="danger">踢掉当前测试者</button>
+      <button id="kick" class="danger">踢掉全部测试者</button>
       <button id="restart" class="danger">重启服务</button>
     </div>
     <p class="error" id="action-error"></p>
@@ -100,9 +100,14 @@ async function loadStatus() {
   setError('');
   try {
     const data = await api('/api/admin/status');
+    const active = new Map((data.active_users || []).map(user => [user.username, user]));
+    const activeText = [...active.values()]
+      .map(user => (user.label || '未命名') + ' / ' + user.username)
+      .join('、') || '（无人）';
     const lines = [
       '实验模式: ' + (data.enabled ? '开' : '关'),
-      '当前测试者: ' + (data.active_user || '（无人）'),
+      '当前测试者: ' + activeText,
+      '容量: ' + active.size + ' / ' + (data.max_active || 5),
       '会话 TTL: ' + Math.round(data.ttl_seconds || 0) + ' 秒',
     ];
     $('status').textContent = lines.join('\n');
@@ -111,6 +116,23 @@ async function loadStatus() {
     for (const user of data.participants || []) {
       const item = document.createElement('li');
       item.textContent = (user.label || '未命名') + ' · ' + user.username;
+      if (active.has(user.username)) {
+        const badge = document.createElement('span');
+        badge.className = 'badge';
+        badge.textContent = '使用中';
+        item.appendChild(badge);
+        const kick = document.createElement('button');
+        kick.className = 'secondary small';
+        kick.style.marginLeft = '8px';
+        kick.textContent = '踢掉';
+        kick.onclick = () => run(async () => {
+          if (!confirm('踢掉 ' + user.username + ' 并清空其编辑状态？')) return;
+          await api('/api/admin/kick', {username: user.username});
+          setOk('已踢掉 ' + user.username + '。');
+          await loadStatus();
+        });
+        item.appendChild(kick);
+      }
       list.appendChild(item);
     }
     showPanel(true);
@@ -147,9 +169,9 @@ $('forget').onclick = () => {
 };
 $('refresh').onclick = () => run(loadStatus);
 $('kick').onclick = () => run(async () => {
-  if (!confirm('强制释放当前测试者并清空所有编辑状态？')) return;
+  if (!confirm('强制释放全部测试者并清空所有编辑状态？')) return;
   await api('/api/admin/reset');
-  setOk('已踢掉当前测试者，状态已清空。');
+  setOk('已踢掉全部测试者，状态已清空。');
   await loadStatus();
 });
 $('generate').onclick = () => run(async () => {
@@ -169,7 +191,7 @@ $('copy').onclick = async () => {
   catch (_error) { setError('剪贴板不可用，请手动选择复制。'); }
 };
 $('restart').onclick = () => run(async () => {
-  if (!confirm('重启服务会断开当前测试者，确定？')) return;
+  if (!confirm('重启服务会断开所有测试者，确定？')) return;
   await api('/api/admin/restart');
   setOk('正在重启，等待服务恢复...');
   $('restart').disabled = true;

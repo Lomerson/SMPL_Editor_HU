@@ -1,16 +1,15 @@
-"""Experiment access gate: random usernames, one active participant.
+"""Experiment access gate: random usernames, up to five active participants.
 
-The viewer itself has no accounts and its ``ModelCache`` is intentionally a
-single global object (one SMPL-X model, one edit state).  That is fine for a
-scheduled experiment but not for a public Funnel URL: two participants would
-otherwise share the same edits.  This module adds a deliberately small gate:
+Each participant gets an independent ModelCache workspace in the server.  This
+module only manages the small set of active sessions and the shared capacity:
 
 * each participant has a random username and a long random access token;
 * a successful login sets ``smplx_session`` as an HttpOnly cookie;
-* only one participant may hold the active lease at a time;
+* up to five distinct participants may hold an active session at a time;
+* one username has one live session (a new login replaces the old tab);
 * every authenticated request refreshes a short TTL, so a crashed browser
   releases the experiment after a few minutes;
-* the experimenter can reset the lease from localhost.
+* the experimenter can kick one participant or reset all of them.
 
 It is not a general user system and stores sessions in memory only.
 """
@@ -76,17 +75,17 @@ class AccessController:
     def __init__(self, participants: dict[str, Participant] | None = None,
                  *, enabled: bool = False, ttl: float = DEFAULT_TTL,
                  cookie_secure: bool = True, admin_token: str = "",
-                 participants_path: str | Path | None = None):
+                 participants_path: str | Path | None = None,
+                 max_active: int = 5):
         self.participants = participants or {}
         self.participants_path = Path(participants_path).expanduser() if participants_path else None
         self.enabled = bool(enabled)
         self.ttl = max(30.0, float(ttl))
         self.cookie_secure = bool(cookie_secure)
         self.admin_token = str(admin_token or "")
+        self.max_active = max(1, min(20, int(max_active)))
         self._lock = threading.Lock()
         self._sessions: dict[str, tuple[str, float]] = {}
-        self._active_user: str | None = None
-        self._active_seen = 0.0
         self._last_error = ""
 
     @classmethod
@@ -110,6 +109,7 @@ class AccessController:
             cookie_secure=secure,
             admin_token=os.environ.get("SMPLX_ADMIN_TOKEN", ""),
             participants_path=path,
+            max_active=int(os.environ.get("SMPLX_MAX_ACTIVE", "5")),
         )
 
     @property
@@ -126,9 +126,9 @@ class AccessController:
         for token, (user, seen) in list(self._sessions.items()):
             if now - seen > self.ttl:
                 self._sessions.pop(token, None)
-        if self._active_user and now - self._active_seen > self.ttl:
-            self._active_user = None
-            self._active_seen = 0.0
+
+    def _active_usernames_locked(self) -> set[str]:
+        return {username for username, _seen in self._sessions.values()}
 
     def login(self, username: str, token: str):
         """Return (status, session_token, message)."""
@@ -140,12 +140,15 @@ class AccessController:
                 return 401, None, "用户名或访问码错误"
             now = time.time()
             self._expire_locked(now)
-            if self._active_user and self._active_user != username:
-                return 423, None, "当前有受试者正在使用系统，请稍后再试"
+            active = self._active_usernames_locked()
+            if username not in active and len(active) >= self.max_active:
+                return 423, None, f"当前已有 {self.max_active} 位测试者正在使用系统，请稍后再试"
+            # One live session per username: re-login replaces the old tab.
+            for old_token, (old_user, _seen) in list(self._sessions.items()):
+                if old_user == username:
+                    self._sessions.pop(old_token, None)
             session_token = secrets.token_urlsafe(32)
             self._sessions[session_token] = (username, now)
-            self._active_user = username
-            self._active_seen = now
             return 200, session_token, "ok"
 
     def check(self, cookie_header: str | None) -> str | None:
@@ -161,31 +164,32 @@ class AccessController:
             if record is None:
                 return None
             username, _seen = record
-            if self._active_user != username:
-                self._sessions.pop(token, None)
-                return None
             self._sessions[token] = (username, now)
-            self._active_seen = now
             return username
 
     def ping(self, cookie_header: str | None) -> str | None:
         return self.check(cookie_header)
 
-    def logout(self, cookie_header: str | None) -> bool:
+    def logout(self, cookie_header: str | None) -> str | None:
         token = self._cookie_value(cookie_header)
         if not token:
-            return False
+            return None
         with self._lock:
             record = self._sessions.pop(token, None)
-            if record and record[0] == self._active_user:
-                self._active_user = None
-                self._active_seen = 0.0
-            return record is not None
+            return record[0] if record else None
+
+    def kick(self, username: str) -> bool:
+        username = str(username or "").strip()
+        with self._lock:
+            removed = False
+            for token, (user, _seen) in list(self._sessions.items()):
+                if user == username:
+                    self._sessions.pop(token, None)
+                    removed = True
+            return removed
 
     def reset_active(self):
         with self._lock:
-            self._active_user = None
-            self._active_seen = 0.0
             self._sessions.clear()
 
     def admin_authorized(self, token: str) -> bool:
@@ -242,9 +246,18 @@ class AccessController:
     def admin_status(self) -> dict:
         with self._lock:
             self._expire_locked(time.time())
+            active_users = sorted(self._active_usernames_locked())
+            labels = {
+                item.username: item.label for item in self.participants.values()
+            }
             return {
                 "enabled": self.enabled,
-                "active_user": self._active_user,
+                "active_user": active_users[0] if active_users else None,
+                "active_users": [
+                    {"username": name, "label": labels.get(name, "")}
+                    for name in active_users
+                ],
+                "max_active": self.max_active,
                 "ttl_seconds": self.ttl,
                 "participants": [
                     {"username": item.username, "label": item.label}
@@ -252,10 +265,16 @@ class AccessController:
                 ],
             }
 
+    def active_users(self) -> list[str]:
+        with self._lock:
+            self._expire_locked(time.time())
+            return sorted(self._active_usernames_locked())
+
     def active_user(self) -> str | None:
         with self._lock:
             self._expire_locked(time.time())
-            return self._active_user
+            active_users = sorted(self._active_usernames_locked())
+            return active_users[0] if active_users else None
 
     def session_cookie(self, token: str, secure: bool | None = None) -> str:
         max_age = int(max(self.ttl * 4, 600))

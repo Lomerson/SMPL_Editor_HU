@@ -50,10 +50,10 @@ class ExperimentAssetsTest(unittest.TestCase):
 
     def test_asset_discovery(self):
         found = experiment_assets.entries()
-        self.assertEqual(len(found), 1)
-        self.assertEqual(found[0].image_path.name, "7.jpg")
-        self.assertEqual(found[0].model_path.name, "fitted_smplx.npz")
-        self.assertEqual(found[0].gender, GENDER)
+        matches = [entry for entry in found if entry.image_path.name == "7.jpg"]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].model_path.name, "fitted_smplx.npz")
+        self.assertEqual(matches[0].gender, GENDER)
 
     def test_exact_and_resized_images_match(self):
         self.assertIsNotNone(experiment_assets.match_image(self._rgb()))
@@ -82,7 +82,10 @@ class ExperimentAssetsTest(unittest.TestCase):
         self.assertEqual(display["image_size"], [848, 1200])
         self.assertEqual(len(display["quad"]), 4)
         self.assertTrue(all(abs(float(point[2])) < 1e-6 for point in display["quad"]))
-        entry = experiment_assets.entries()[0]
+        entry = next(
+            item for item in experiment_assets.entries()
+            if item.image_path.name == "7.jpg"
+        )
         expected = np.asarray(entry.registration["front"]["pixel_to_world"]) @ np.array(
             [0.0, 0.0, 0.0, 1.0]
         )

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import gzip
 import io
 import zipfile
 import json
@@ -21,6 +22,7 @@ from core import autofit, experiment_assets
 from core.access import AccessController
 from core.config import DEVICE_CHOICES, GENDERS
 from core.model import ModelCache, resolve_device
+from core.workspaces import BoundWorkspaceCache, SingleWorkspacePool, WorkspacePool
 
 WEB_ROOT = (Path(__file__).resolve().parent / "web").resolve()
 HTML = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
@@ -32,34 +34,76 @@ VENDOR_ROOT = (WEB_ROOT / "vendor").resolve()
 PICS_PATH = (Path(__file__).resolve().parent / "pics.zip").resolve()
 ADMIN_HTML = (WEB_ROOT / "admin.html").read_text(encoding="utf-8")
 
-def handler_factory(cache: ModelCache, access: AccessController | None = None):
+def _truthy(value, default=False):
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def handler_factory(cache, access: AccessController | None = None, workspaces=None):
     access = access or AccessController.disabled()
+    if workspaces is None:
+        if isinstance(cache, WorkspacePool):
+            workspaces = cache
+            cache = cache.cache
+        elif isinstance(cache, BoundWorkspaceCache):
+            workspaces = cache.pool
+        else:
+            workspaces = SingleWorkspacePool(cache)
+            cache = workspaces.cache
+
+    autofit_limit = threading.Semaphore(
+        max(1, int(os.environ.get("SMPLX_MAX_CONCURRENT_AUTOFIT", "1")))
+    )
 
     class Handler(SimpleHTTPRequestHandler):
+        protocol_version = (
+            "HTTP/1.1"
+            if _truthy(os.environ.get("SMPLX_HTTP_KEEPALIVE"), True)
+            else "HTTP/1.0"
+        )
+
         def log_message(self, *_args):
             return
 
-        def send_json(self, payload, status=HTTPStatus.OK, headers=None):
-            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        def _compress(self, body: bytes, content_type: str, headers=None):
+            headers = dict(headers or {})
+            if (
+                _truthy(os.environ.get("SMPLX_GZIP"), True)
+                and len(body) > 1024
+                and "gzip" in str(self.headers.get("Accept-Encoding", "")).lower()
+                and not any(
+                    token in content_type
+                    for token in ("zip", "gzip", "glb", "png", "octet-stream")
+                )
+            ):
+                body = gzip.compress(body, compresslevel=1)
+                headers["Content-Encoding"] = "gzip"
+                headers["Vary"] = "Accept-Encoding"
+            return body, headers
+
+        def send_bytes(self, body: bytes, content_type: str, status=HTTPStatus.OK,
+                       headers=None, cache_control="no-store, max-age=0",
+                       compress=True):
+            if compress:
+                body, headers = self._compress(body, content_type, headers)
+            headers = dict(headers or {})
             self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store, max-age=0")
-            for key, value in (headers or {}).items():
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", cache_control)
+            for key, value in headers.items():
                 self.send_header(key, value)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
             self.wfile.flush()
 
+        def send_json(self, payload, status=HTTPStatus.OK, headers=None):
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_bytes(body, "application/json; charset=utf-8", status, headers)
+
         def send_html(self, body: str, status=HTTPStatus.OK):
-            raw = body.encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Cache-Control", "no-store, max-age=0")
-            self.send_header("Content-Length", str(len(raw)))
-            self.end_headers()
-            self.wfile.write(raw)
-            self.wfile.flush()
+            self.send_bytes(body.encode("utf-8"), "text/html; charset=utf-8", status)
 
         def send_login(self, error: str = ""):
             self.send_html(access.login_page(error))
@@ -131,26 +175,24 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
                 ".woff2": "font/woff2",
             }.get(candidate.suffix.lower(), "application/octet-stream")
             data = candidate.read_bytes()
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Cache-Control", "public, max-age=3600")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            self.send_bytes(
+                data,
+                content_type,
+                cache_control="public, max-age=3600",
+                compress=candidate.suffix.lower() in {".js", ".mjs", ".css", ".json", ".svg"},
+            )
 
         def send_pics(self):
             if not PICS_PATH.is_file():
                 self.send_json({"ok": False, "error": "pics.zip is not available"}, HTTPStatus.NOT_FOUND)
                 return
             data = PICS_PATH.read_bytes()
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "application/zip")
-            self.send_header("Content-Disposition", 'attachment; filename="pics.zip"')
-            self.send_header("Cache-Control", "no-store, max-age=0")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-            self.wfile.flush()
+            self.send_bytes(
+                data,
+                "application/zip",
+                headers={"Content-Disposition": 'attachment; filename="pics.zip"'},
+                compress=False,
+            )
 
         def do_GET(self):
             path = urlparse(self.path).path
@@ -163,21 +205,28 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
             if path == "/admin":
                 self.send_html(ADMIN_HTML)
                 return
-            if access.enabled and not self.current_user():
-                if path in ("/", "/index.html"):
-                    self.send_login()
+            if access.enabled:
+                user = self.current_user()
+                if not user:
+                    if path in ("/", "/index.html"):
+                        self.send_login()
+                        return
+                    if path.startswith("/api/"):
+                        self.send_unauthorized()
+                        return
+                    self.send_error(HTTPStatus.UNAUTHORIZED)
                     return
-                if path.startswith("/api/"):
-                    self.send_unauthorized()
-                    return
-                self.send_error(HTTPStatus.UNAUTHORIZED)
-                return
+            else:
+                user = "local"
+            cache.bind(user)
             if path == "/api/session":
                 self.send_json(
                     {
                         "ok": True,
                         "experiment": access.experiment_mode,
-                        "user": access.active_user() if access.enabled else None,
+                        "user": user if access.enabled else None,
+                        "active_users": access.active_users() if access.enabled else ["local"],
+                        "max_active": access.max_active if access.enabled else 1,
                     }
                 )
                 return
@@ -193,6 +242,25 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
             if path == "/api/models":
                 self.send_json({"models": [{"gender": gender, "label": label, "available": cache.available(gender)} for gender, label in GENDERS.items()]})
                 return
+            if path.startswith("/api/positions/"):
+                gender = path.rsplit("/", 1)[-1]
+                try:
+                    with cache.lock:
+                        _model, vertices, _joints, _parents = cache._geometry(gender)
+                    data = np.asarray(vertices, dtype=np.float32).tobytes()
+                except FileNotFoundError:
+                    self.send_error(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
+                    return
+                except Exception as exc:
+                    self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                    return
+                self.send_bytes(
+                    data,
+                    "application/octet-stream",
+                    headers={"X-Vertex-Count": str(len(data) // 12)},
+                    compress=False,
+                )
+                return
             if path.startswith("/api/model/"):
                 gender = path.rsplit("/", 1)[-1]
                 try:
@@ -204,12 +272,7 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
                     self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
                     return
                 data = model_path.read_bytes()
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
-                self.send_header("Cache-Control", "no-store, max-age=0")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
+                self.send_bytes(data, "text/plain; charset=utf-8", compress=True)
                 return
             if path.startswith("/api/export/glb/"):
                 gender = path.rsplit("/", 1)[-1]
@@ -244,16 +307,12 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
                     self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
                     return
                 data = target.read_bytes()
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header(
-                    "Content-Disposition",
-                    f'attachment; filename="{target.name}"',
+                self.send_bytes(
+                    data,
+                    "application/json; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{target.name}"'},
+                    compress=False,
                 )
-                self.send_header("Cache-Control", "no-store, max-age=0")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
                 return
             if path.startswith("/api/export/displacement/"):
                 gender = path.rsplit("/", 1)[-1]
@@ -400,12 +459,13 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
                         target = root / relative
                         target.parent.mkdir(parents=True, exist_ok=True)
                         target.write_bytes(raw)
-                    if access.experiment_mode:
-                        shortcut = experiment_assets.try_apply(cache, gender, path=str(root))
-                        if shortcut is not None:
-                            self.send_json(shortcut)
-                            return
-                    result = autofit.run(cache, gender, path=str(root))
+                    with autofit_limit:
+                        if access.experiment_mode:
+                            shortcut = experiment_assets.try_apply(cache, gender, path=str(root))
+                            if shortcut is not None:
+                                self.send_json(shortcut)
+                                return
+                        result = autofit.run(cache, gender, path=str(root))
                     result["source"] = "文件夹（上传）"
                 self.send_json(result)
             except FileNotFoundError:
@@ -433,14 +493,15 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
             payload = self.rfile.read(size)
             filename = self.headers.get("X-Filename", "upload")
             try:
-                if access.experiment_mode:
-                    shortcut = experiment_assets.try_apply(
-                        cache, gender, data=payload, filename=filename
-                    )
-                    if shortcut is not None:
-                        self.send_json(shortcut)
-                        return
-                result = autofit.run(cache, gender, data=payload, filename=filename)
+                with autofit_limit:
+                    if access.experiment_mode:
+                        shortcut = experiment_assets.try_apply(
+                            cache, gender, data=payload, filename=filename
+                        )
+                        if shortcut is not None:
+                            self.send_json(shortcut)
+                            return
+                    result = autofit.run(cache, gender, data=payload, filename=filename)
             except FileNotFoundError:
                 self.send_error(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
                 return
@@ -493,12 +554,29 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
             if not self.require_admin(data):
                 return
             access.reset_active()
-            cache.reset_session_state()
+            workspaces.drop_all()
             self.send_json({"ok": True})
+
+        def _handle_admin_kick(self):
+            try:
+                data = self.read_json()
+            except Exception:
+                self.send_json({"ok": False, "error": "invalid admin payload"}, HTTPStatus.BAD_REQUEST)
+                return
+            if not self.require_admin(data):
+                return
+            username = str(data.get("username", "")).strip()
+            if not username or username not in access.participants:
+                self.send_json({"ok": False, "error": "unknown participant"}, HTTPStatus.NOT_FOUND)
+                return
+            removed = access.kick(username)
+            workspaces.drop(username)
+            self.send_json({"ok": True, "username": username, "kicked": removed})
 
         def _handle_admin_status(self):
             if not self.require_admin():
                 return
+            workspaces.prune(access.active_users())
             payload = {"ok": True}
             payload.update(access.admin_status())
             self.send_json(payload)
@@ -545,9 +623,12 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
             if token is None:
                 self.send_json({"ok": False, "error": message}, status)
                 return
-            cache.reset_session_state()
+            username = str(data.get("username", "")).strip()
+            workspaces.drop(username)
+            workspaces.prune(access.active_users())
+            cache.bind(username)
             self.send_json(
-                {"ok": True, "user": str(data.get("username", "")).strip()},
+                {"ok": True, "user": username},
                 status,
                 headers={
                     "Set-Cookie": access.session_cookie(
@@ -567,6 +648,9 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
             if path == "/api/admin/restart":
                 self._handle_admin_restart()
                 return
+            if path == "/api/admin/kick":
+                self._handle_admin_kick()
+                return
             if path == "/api/admin/reset":
                 self._handle_admin_reset()
                 return
@@ -574,9 +658,9 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
                 self._handle_login()
                 return
             if path == "/api/logout":
-                removed = access.logout(self.headers.get("Cookie"))
-                if removed and access.experiment_mode:
-                    cache.reset_session_state()
+                username = access.logout(self.headers.get("Cookie"))
+                if username and access.experiment_mode:
+                    workspaces.drop(username)
                 self.send_json(
                     {"ok": True},
                     headers={
@@ -592,9 +676,14 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
                     return
                 self.send_json({"ok": True})
                 return
-            if access.enabled and not self.current_user():
-                self.send_unauthorized()
-                return
+            if access.enabled:
+                user = self.current_user()
+                if not user:
+                    self.send_unauthorized()
+                    return
+            else:
+                user = "local"
+            cache.bind(user)
             if path == "/api/autofit/path" and not access.allow_server_paths:
                 self.send_json(
                     {"ok": False, "error": "server paths are disabled in experiment mode"},
@@ -743,6 +832,13 @@ def main():
         help="directory holding anime_pose_detector.py (reference-picture eye detection)",
     )
     args = parser.parse_args()
+    try:
+        import torch
+        threads = max(1, int(os.environ.get("SMPLX_TORCH_THREADS", "4")))
+        torch.set_num_threads(threads)
+        print(f"torch threads: {threads}", flush=True)
+    except Exception as exc:
+        print(f"torch threads: unchanged ({type(exc).__name__}: {exc})", flush=True)
     device, reason = resolve_device(args.device)
     if args.device != "auto" and args.device != device:
         print(f"[device] {args.device} requested but unusable -> cpu", flush=True)
@@ -757,15 +853,19 @@ def main():
         f" · server paths: {'allowed' if access.allow_server_paths else 'blocked'}",
         flush=True,
     )
+    workspaces = WorkspacePool(
+        args.model_dir,
+        args.cache_dir,
+        device=device,
+        detector_dir=args.detector_dir,
+    )
     server = ThreadingHTTPServer(
         (args.host, args.port),
-        handler_factory(
-            ModelCache(
-                args.model_dir, args.cache_dir, device=device,
-                detector_dir=args.detector_dir,
-            ),
-            access=access,
-        ),
+        handler_factory(workspaces.cache, access=access, workspaces=workspaces),
+    )
+    print(
+        f"access capacity: {access.max_active if access.enabled else 1} participant(s)",
+        flush=True,
     )
     print(f"SMPL-X viewer: http://{args.host}:{args.port}", flush=True)
     server.serve_forever()

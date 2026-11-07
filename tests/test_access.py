@@ -1,4 +1,4 @@
-"""Checks for the experiment login/single-session gate."""
+"""Checks for the experiment login/multi-session gate."""
 from __future__ import annotations
 
 import json
@@ -44,30 +44,60 @@ class AccessTest(unittest.TestCase):
         status, token, _ = self.access.login("missing", "a" * 32)
         self.assertEqual(status, 401)
 
-    def test_only_one_active_participant(self):
-        status, token, _ = self.access.login("u_alpha", "a" * 32)
-        self.assertEqual(status, 200)
-        status, token2, _ = self.access.login("u_beta", "b" * 32)
+    def _six_user_access(self):
+        users = {
+            f"u_{index}": Participant(f"u_{index}", chr(96 + index) * 32, f"P{index:02d}")
+            for index in range(1, 7)
+        }
+        return AccessController(
+            users, enabled=True, ttl=30.0, cookie_secure=False,
+            admin_token="secret-admin", max_active=5,
+        )
+
+    def test_five_active_participants_and_sixth_rejected(self):
+        access = self._six_user_access()
+        tokens = []
+        for index in range(1, 6):
+            status, token, _ = access.login(f"u_{index}", chr(96 + index) * 32)
+            self.assertEqual(status, 200)
+            tokens.append(token)
+        self.assertEqual(len(access.active_users()), 5)
+        status, token, message = access.login("u_6", "f" * 32)
         self.assertEqual(status, 423)
-        self.assertIsNone(token2)
-        self.assertEqual(self.access.active_user(), "u_alpha")
+        self.assertIsNone(token)
+        self.assertIn("5", message)
+        self.assertEqual(access.active_users(), ["u_1", "u_2", "u_3", "u_4", "u_5"])
 
-    def test_lease_expires_and_logout_releases(self):
-        status, token, _ = self.access.login("u_alpha", "a" * 32)
+    def test_logout_frees_a_capacity_slot(self):
+        access = self._six_user_access()
+        tokens = {}
+        for index in range(1, 6):
+            status, token, _ = access.login(f"u_{index}", chr(96 + index) * 32)
+            self.assertEqual(status, 200)
+            tokens[index] = token
+        self.assertEqual(access.login("u_6", "f" * 32)[0], 423)
+        self.assertEqual(access.logout(access.session_cookie(tokens[1])), "u_1")
+        status, token, _ = access.login("u_6", "f" * 32)
         self.assertEqual(status, 200)
-        cookie = self.access.session_cookie(token)
-        # Simulate an abandoned browser without waiting 30 seconds.
-        self.access._active_seen = time.time() - 31
-        self.access._sessions[token] = ("u_alpha", time.time() - 31)
-        status, token2, _ = self.access.login("u_beta", "b" * 32)
-        self.assertEqual(status, 200)
-        self.assertEqual(self.access.active_user(), "u_beta")
-        self.assertIsNone(self.access.check(cookie))
+        self.assertIn("u_6", access.active_users())
 
-        self.access.logout(self.access.session_cookie(token2))
-        self.assertIsNone(self.access.active_user())
-        status, _token3, _ = self.access.login("u_alpha", "a" * 32)
+    def test_lease_expiry_frees_a_capacity_slot(self):
+        access = self._six_user_access()
+        for index in range(1, 6):
+            status, token, _ = access.login(f"u_{index}", chr(96 + index) * 32)
+            self.assertEqual(status, 200)
+            # Simulate an abandoned browser without waiting 30 seconds.
+            access._sessions[token] = (f"u_{index}", time.time() - 31)
+        self.assertEqual(access.login("u_6", "f" * 32)[0], 200)
+
+    def test_repeated_login_replaces_old_session(self):
+        status, first, _ = self.access.login("u_alpha", "a" * 32)
         self.assertEqual(status, 200)
+        status, second, _ = self.access.login("u_alpha", "a" * 32)
+        self.assertEqual(status, 200)
+        self.assertIsNone(self.access.check(self.access.session_cookie(first)))
+        self.assertEqual(self.access.check(self.access.session_cookie(second)), "u_alpha")
+        self.assertEqual(self.access.active_users(), ["u_alpha"])
 
     def test_generated_participant_persists_and_can_login(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -84,19 +114,28 @@ class AccessTest(unittest.TestCase):
             saved = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(saved["users"][0]["username"], created["username"])
 
-    def test_logout_reports_whether_a_session_was_removed(self):
-        self.assertFalse(self.access.logout("smplx_session=missing"))
+    def test_logout_reports_the_username(self):
+        self.assertIsNone(self.access.logout("smplx_session=missing"))
         status, token, _ = self.access.login("u_alpha", "a" * 32)
         self.assertEqual(status, 200)
         cookie = self.access.session_cookie(token)
-        self.assertTrue(self.access.logout(cookie))
-        self.assertFalse(self.access.logout(cookie))
+        self.assertEqual(self.access.logout(cookie), "u_alpha")
+        self.assertIsNone(self.access.logout(cookie))
 
     def test_admin_status_lists_participants_without_tokens(self):
         status = self.access.admin_status()
         self.assertTrue(status["enabled"])
         self.assertEqual({item["username"] for item in status["participants"]}, {"u_alpha", "u_beta"})
         self.assertNotIn("token", status["participants"][0])
+        self.assertEqual(status["max_active"], 5)
+        self.assertEqual(status["active_users"], [])
+
+    def test_admin_kick_only_removes_target_user(self):
+        self.access.login("u_alpha", "a" * 32)
+        self.access.login("u_beta", "b" * 32)
+        self.assertTrue(self.access.kick("u_alpha"))
+        self.assertEqual(self.access.active_users(), ["u_beta"])
+        self.assertFalse(self.access.kick("u_alpha"))
 
     def test_admin_reset_requires_token(self):
         status, token, _ = self.access.login("u_alpha", "a" * 32)

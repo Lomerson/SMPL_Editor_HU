@@ -1020,27 +1020,52 @@ function setSymmetric(value){
 async function load(gender,edited=false,force=false){
   if(selected===gender&&!force)return;
   const shouldFrame=selected!==gender||!meshRoot;
+  const reuseGeometry=!!meshRoot&&!shouldFrame&&meshRoot.userData.gender===gender;
   selected=gender;choices.value=gender;
   setStatus('正在加载 '+gender+' 模型...');
   try{
     const suffix='?revision='+(++revision);
-    const [meshText,skeleton]=await Promise.all([
-      fetch('/api/model/'+gender+suffix,{cache:'no-store'}).then((r)=>{if(!r.ok)throw Error('网格读取失败');return r.text();}),
+    const [primary,skeleton]=await Promise.all([
+      reuseGeometry
+        ? fetch('/api/positions/'+gender+suffix,{cache:'no-store'}).then((r)=>{if(!r.ok)throw Error('顶点读取失败');return r.arrayBuffer();})
+        : fetch('/api/model/'+gender+suffix,{cache:'no-store'}).then((r)=>{if(!r.ok)throw Error('网格读取失败');return r.text();}),
       fetch('/api/skeleton/'+gender+suffix,{cache:'no-store'}).then((r)=>{if(!r.ok)throw Error('骨架数据读取失败');return r.json();})
     ]);
-    if(meshRoot)scene.remove(meshRoot);
-    const material=new THREE.MeshStandardMaterial({color:0xffffff,vertexColors:true,roughness:.72,metalness:.03,transparent:true,opacity:MESH_OPACITY,depthWrite:false,side:THREE.DoubleSide});
-    const obj=new THREE.Mesh(parseObjGeometry(meshText),material);
-    meshRoot=obj;
-    groundOffset=.02-new THREE.Box3().setFromObject(obj).min.y;
-    obj.position.y=groundOffset;
-    scene.add(obj);
+    let meshText=reuseGeometry?null:primary;
+    let positions=reuseGeometry?new Float32Array(primary):null;
+    if(positions&&positions.length!==meshRoot.geometry.attributes.position.count*3){
+      // A custom model can change topology; fall back to the complete OBJ.
+      meshText=await fetch('/api/model/'+gender+suffix,{cache:'no-store'}).then((r)=>{if(!r.ok)throw Error('网格读取失败');return r.text();});
+      positions=null;
+      segmentOwners=null;segmentOwnersGender=null;
+    }
+    if(positions){
+      const geometry=meshRoot.geometry;
+      const attribute=geometry.attributes.position;
+      attribute.array.set(positions);
+      attribute.needsUpdate=true;
+      geometry.computeVertexNormals();
+      geometry.computeBoundingBox();
+      geometry.computeBoundingSphere();
+      groundOffset=.02-new THREE.Box3().setFromObject(meshRoot).min.y;
+      meshRoot.position.y=groundOffset;
+      meshRoot.userData.gender=gender;
+    }else{
+      if(meshRoot)scene.remove(meshRoot);
+      const material=new THREE.MeshStandardMaterial({color:0xffffff,vertexColors:true,roughness:.72,metalness:.03,transparent:true,opacity:MESH_OPACITY,depthWrite:false,side:THREE.DoubleSide});
+      const obj=new THREE.Mesh(parseObjGeometry(meshText),material);
+      obj.userData.gender=gender;
+      meshRoot=obj;
+      groundOffset=.02-new THREE.Box3().setFromObject(obj).min.y;
+      obj.position.y=groundOffset;
+      scene.add(obj);
+    }
     paintMesh();
     addSkeleton(skeleton,groundOffset);
     updateDisplacementButtons(!!skeleton.has_displacement);
     renderHistory(skeleton.history);
     ensureOwners(gender);
-    if(shouldFrame)frame(obj);
+    if(shouldFrame)frame(meshRoot);
     applySkinOpacity();
     if(referenceViews.length)realignReference();
     document.querySelector('#reset').disabled=false;
