@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import base64
 import io
+import zipfile
 import json
 import os
 import sys
@@ -292,6 +293,29 @@ def handler_factory(cache: ModelCache, access: AccessController | None = None):
                 self.send_header(
                     "Content-Disposition",
                     f'attachment; filename="{target.name}"',
+                )
+                self.send_header("Cache-Control", "no-store, max-age=0")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            if path.startswith("/api/export/front/"):
+                gender = path.rsplit("/", 1)[-1]
+                try:
+                    target = cache.fourview(gender)
+                    with zipfile.ZipFile(target) as archive:
+                        data = archive.read("front.png")
+                except FileNotFoundError:
+                    self.send_error(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
+                    return
+                except Exception as exc:
+                    self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                    return
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "image/png")
+                self.send_header(
+                    "Content-Disposition",
+                    f'attachment; filename="front_{gender}.png"',
                 )
                 self.send_header("Cache-Control", "no-store, max-age=0")
                 self.send_header("Content-Length", str(len(data)))
