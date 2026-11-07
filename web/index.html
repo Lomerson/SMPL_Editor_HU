@@ -98,14 +98,34 @@
   <details class="panel" open><summary class="section-title">骨段编辑</summary><div id="segment-editor" class="segment-empty">点击一条黄色骨骼连线以编辑该骨段。</div></details>
   <details class="panel" open><summary class="section-title">头部编辑</summary><div id="head-editor" class="segment-empty">正在读取头部参数...</div></details>
   <details class="panel"><summary class="section-title">导出</summary><div class="segment-tools export-buttons"><button id="export-glb" class="small" title="下载带 55 关节蒙皮的 T-pose GLB">GLB</button><button id="export-params" class="small" title="下载 identity 参数 JSON">参数</button><button id="export-fourview" class="small" title="下载四视图 PNG + views.json">四视图</button></div><div class="segment-tools export-buttons" id="disp-buttons"><button id="disp-pick" class="small" title="导入 Blender shape key 导出的 (N,3) .npy">导入位移</button><button id="disp-clear" class="small" disabled title="移除已导入的位移">清除位移</button></div><input id="disp-file" type="file" accept=".npy,application/octet-stream"><p class="sub" id="export-help">GLB 带 55 关节蒙皮（Blender 会得到 Armature + Vertex Groups）；四视图为完整蒙皮截图（侧视隐藏手臂并标出肩/臂截面）；导出始终是 T-pose identity，不包含当前摆姿。位移会应用到 GLB/四视图。</p></details>
-  <div id="status">正在读取模型信息...</div>
+  <div id="status">正在加载前端资源（three.js）...</div>
 </aside><main><canvas id="viewer"></canvas><div class="floating-tools" role="toolbar" aria-label="编辑工具"><div class="tool-row"><button id="symmetry-toggle" class="tool-btn active" aria-pressed="true" title="对称编辑">对称</button><button id="undo-btn" class="tool-btn" title="撤回 (Ctrl+Z)" disabled>撤回</button><button id="reset" class="tool-btn tool-wide" title="全部重置" disabled>全部重置</button><button id="logout-btn" class="tool-btn" title="退出实验" hidden>退出</button></div><div id="skin-opacity-host" class="floating-opacity" title="0 透明（只看骨架） / 1 半透明 / 2 不透明"></div></div><div class="hud">点击黄色身体关节后拖动<br>空白处拖动旋转 · 滚轮缩放</div><div id="toasts"></div></main></div>
 <div id="history-drawer" class="history-drawer" aria-hidden="true"><button id="history-tab" class="history-tab" aria-expanded="false">历史</button><aside class="history-panel"><div class="history-head"><strong>操作历史</strong><button id="history-close" class="small">关闭</button></div><p class="history-hint">单击任意一步回撤/重做</p><ol id="history-list" class="history-list"></ol></aside></div>
-<script type="importmap">{"imports":{"three":"/vendor/three.module.js","three/addons/":"/vendor/addons/"}}</script>
+<script type="importmap">{"imports":{"three":"/vendor/three.module.min.js","three/addons/":"/vendor/addons/"}}</script>
+<script>
+window.__SMPLX_MODULE_LOADED=false;
+setTimeout(function(){
+  if(window.__SMPLX_MODULE_LOADED)return;
+  const element=document.querySelector('#status');
+  if(element)element.textContent='前端资源加载超时：three.js 未加载，请检查网络后刷新页面';
+},15000);
+</script>
 <script type="module">
 import * as THREE from 'three';
 import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+window.__SMPLX_MODULE_LOADED=true;
 const canvas=document.querySelector('#viewer'), status=document.querySelector('#status'), choices=document.querySelector('#gender');
+async function fetchWithTimeout(url,options={},timeout=15000){
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),timeout);
+  try{
+    return await fetch(url,{...options,signal:controller.signal});
+  }catch(error){
+    if(error.name==='AbortError')throw Error('网络请求超时（'+Math.round(timeout/1000)+'秒）');
+    throw error;
+  }finally{clearTimeout(timer);}
+}
+status.textContent='正在读取模型列表...';
 const renderer=new THREE.WebGLRenderer({canvas,antialias:true}); renderer.setPixelRatio(Math.min(devicePixelRatio,2)); renderer.setClearColor(0x111318);
 const scene=new THREE.Scene(), camera=new THREE.PerspectiveCamera(38,1,.01,100); camera.position.set(3.2,1.7,5.6);
 const controls=new OrbitControls(camera,renderer.domElement); controls.target.set(0,.82,0); controls.enableDamping=true; controls.minDistance=1.2; controls.maxDistance=10;
@@ -738,7 +758,7 @@ async function ensureOwners(gender){
   if(segmentOwners&&segmentOwnersGender===gender)return;
   segmentOwners=null;segmentOwnersGender=null;
   try{
-    const response=await fetch('/api/weights/'+gender+'?revision='+(++revision),{cache:'no-store'});
+    const response=await fetchWithTimeout('/api/weights/'+gender+'?revision='+(++revision),{cache:'no-store'},20000);
     if(!response.ok)throw Error(await response.text());
     const owners=new Uint8Array(await response.arrayBuffer());
     if(!meshRoot)return;
@@ -1038,15 +1058,15 @@ async function load(gender,edited=false,force=false){
     const suffix='?revision='+(++revision);
     const [primary,skeleton]=await Promise.all([
       reuseGeometry
-        ? fetch('/api/positions/'+gender+suffix,{cache:'no-store'}).then((r)=>{if(!r.ok)throw Error('顶点读取失败');return r.arrayBuffer();})
-        : fetch('/api/model/'+gender+suffix,{cache:'no-store'}).then((r)=>{if(!r.ok)throw Error('网格读取失败');return r.text();}),
-      fetch('/api/skeleton/'+gender+suffix,{cache:'no-store'}).then((r)=>{if(!r.ok)throw Error('骨架数据读取失败');return r.json();})
+        ? fetchWithTimeout('/api/positions/'+gender+suffix,{cache:'no-store'},20000).then((r)=>{if(!r.ok)throw Error('顶点读取失败');return r.arrayBuffer();})
+        : fetchWithTimeout('/api/model/'+gender+suffix,{cache:'no-store'},20000).then((r)=>{if(!r.ok)throw Error('网格读取失败');return r.text();}),
+      fetchWithTimeout('/api/skeleton/'+gender+suffix,{cache:'no-store'},20000).then((r)=>{if(!r.ok)throw Error('骨架数据读取失败');return r.json();})
     ]);
     let meshText=reuseGeometry?null:primary;
     let positions=reuseGeometry?new Float32Array(primary):null;
     if(positions&&positions.length!==meshRoot.geometry.attributes.position.count*3){
       // A custom model can change topology; fall back to the complete OBJ.
-      meshText=await fetch('/api/model/'+gender+suffix,{cache:'no-store'}).then((r)=>{if(!r.ok)throw Error('网格读取失败');return r.text();});
+      meshText=await fetchWithTimeout('/api/model/'+gender+suffix,{cache:'no-store'},20000).then((r)=>{if(!r.ok)throw Error('网格读取失败');return r.text();});
       positions=null;
       segmentOwners=null;segmentOwnersGender=null;
     }
@@ -1265,7 +1285,18 @@ async function uploadModel(file){
 const modelUpload=document.querySelector('#model-upload'), modelFile=document.querySelector('#model-file');
 if(modelUpload)modelUpload.onclick=()=>modelFile.click();
 if(modelFile)modelFile.onchange=()=>{const file=modelFile.files&&modelFile.files[0];modelFile.value='';if(file)uploadModel(file);};
-async function init(){applyExperimentMode();startExperimentHeartbeat();renderSkinOpacity();renderFitSideZ();const r=await fetch('/api/models');if(!r.ok)throw Error('无法读取模型信息');const data=await r.json();for(const item of data.models){const option=document.createElement('option');option.value=item.gender;option.textContent=item.label+(item.available?'':'（未安装）');option.disabled=!item.available;choices.append(option)}choices.onchange=()=>switchGender(choices.value);const first=data.models.find(x=>x.available);if(first)load(first.gender,true);else setStatus('未找到可用 SMPL-X 模型文件',true)}
+async function init(){
+  applyExperimentMode();startExperimentHeartbeat();renderSkinOpacity();renderFitSideZ();
+  setStatus('正在读取模型列表...');
+  const r=await fetchWithTimeout('/api/models',{},15000);
+  if(!r.ok)throw Error('无法读取模型信息');
+  const data=await r.json();
+  for(const item of data.models){const option=document.createElement('option');option.value=item.gender;option.textContent=item.label+(item.available?'':'（未安装）');option.disabled=!item.available;choices.append(option)}
+  choices.onchange=()=>switchGender(choices.value);
+  const first=data.models.find(x=>x.available);
+  if(first){setStatus('正在加载 '+first.gender+' 模型...');load(first.gender,true)}
+  else setStatus('未找到可用 SMPL-X 模型文件',true)
+}
 init().catch(e=>setStatus(e.message,true));
 autoDownloadPics();
 </script></body></html>

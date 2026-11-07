@@ -11,6 +11,8 @@ LOG="${STATE_DIR}/server.log"
 SESSION="smplx-expt"
 MAX_ACTIVE="${SMPLX_MAX_ACTIVE:-5}"
 TORCH_THREADS="${SMPLX_TORCH_THREADS:-4}"
+PUBLIC_MODE="${SMPLX_PUBLIC_MODE:-cloudflared}"
+PUBLIC_URL=""
 
 cd "$PROJECT_DIR"
 echo "[start] step 1/6: clean previous experiment"
@@ -60,45 +62,88 @@ if /mnt/c/Windows/System32/schtasks.exe /Query /TN "SMPLX Viewer Start" >/dev/nu
   /mnt/c/Windows/System32/schtasks.exe /Delete /TN "SMPLX Viewer Start" /F >/dev/null 2>&1 || true
 fi
 
-echo "[start] step 5/6: verify Funnel capability and apply public broadcast"
-funnel_status="$("$TAILSCALE" funnel status 2>&1 || true)"
-if grep -q "Funnel on" <<<"$funnel_status"; then
-  echo "[start] Funnel already on"
-else
-  funnel_output="$(timeout 15 "$TAILSCALE" funnel --bg "$PORT" 2>&1 || true)"
-  if grep -q "not enabled" <<<"$funnel_output"; then
-    echo "[start] Funnel permission is OFF on this tailnet." >&2
-    echo "$funnel_output" | sed 's/^/  /' >&2
-    echo "[start] Enable Funnel at https://console.tailscale.com/admin/dns" >&2
-    echo "[start] or run 'tailscale funnel --bg ${PORT}' in a terminal and open the printed link." >&2
-    echo "[start] stopping server; then rerun this script." >&2
-    "$PROJECT_DIR/ops/stop_experiment.sh" >/dev/null 2>&1 || true
-    exit 1
-  fi
-  # The CLI can print "Funnel started" before status catches up; accept either
-  # the success banner or a short poll of status.
-  if ! grep -qE "Funnel started|Available on the internet|Funnel on" <<<"$funnel_output"; then
-    for _ in $(seq 1 5); do
-      if "$TAILSCALE" funnel status 2>&1 | grep -q "Funnel on"; then
+echo "[start] step 5/6: start public entry (mode=${PUBLIC_MODE})"
+case "$PUBLIC_MODE" in
+  cloudflared)
+    # Funnel and Cloudflare are mutually exclusive; reset stale broadcasts.
+    "$TAILSCALE" funnel reset >/dev/null 2>&1 || true
+    "$TAILSCALE" serve reset >/dev/null 2>&1 || true
+    "$PROJECT_DIR/ops/start_public_tunnel.sh"
+    PUBLIC_URL="$(cat "${STATE_DIR}/public_url.txt" 2>/dev/null || true)"
+    if [[ -z "$PUBLIC_URL" ]]; then
+      echo "[start] Cloudflare tunnel did not return a URL" >&2
+      "$PROJECT_DIR/ops/stop_experiment.sh" >/dev/null 2>&1 || true
+      exit 1
+    fi
+    public_curl="${PUBLIC_CURL:-/mnt/c/Windows/System32/curl.exe}"
+    [[ -x "$public_curl" ]] || public_curl="curl"
+    public_ok=0
+    for _ in $(seq 1 30); do
+      if "$public_curl" -fsS --max-time 5 "${PUBLIC_URL}/" >/dev/null 2>&1; then
+        public_ok=1
         break
       fi
-      sleep 1
+      sleep 2
     done
-  fi
-  if ! grep -qE "Funnel started|Available on the internet|Funnel on" <<<"$funnel_output" \
-     && ! "$TAILSCALE" funnel status 2>&1 | grep -q "Funnel on"; then
-    echo "[start] could not confirm Funnel is on." >&2
-    echo "$funnel_output" | sed 's/^/  /' >&2
-    "$PROJECT_DIR/ops/stop_experiment.sh" >/dev/null 2>&1 || true
+    if [[ "$public_ok" -ne 1 ]]; then
+      echo "[start] WARNING: Cloudflare URL is not reachable yet: ${PUBLIC_URL}" >&2
+      echo "[start] The tunnel process is still running; test it from the phone/4G." >&2
+    fi
+    ;;
+  funnel)
+    funnel_status="$("$TAILSCALE" funnel status 2>&1 || true)"
+    if grep -q "Funnel on" <<<"$funnel_status"; then
+      echo "[start] Funnel already on"
+    else
+      funnel_output="$(timeout 15 "$TAILSCALE" funnel --bg "$PORT" 2>&1 || true)"
+      if grep -q "not enabled" <<<"$funnel_output"; then
+        echo "[start] Funnel permission is OFF on this tailnet." >&2
+        echo "$funnel_output" | sed 's/^/  /' >&2
+        echo "[start] Enable Funnel at https://console.tailscale.com/admin/dns" >&2
+        echo "[start] or set SMPLX_PUBLIC_MODE=cloudflared and rerun." >&2
+        "$PROJECT_DIR/ops/stop_experiment.sh" >/dev/null 2>&1 || true
+        exit 1
+      fi
+      if ! grep -qE "Funnel started|Available on the internet|Funnel on" <<<"$funnel_output"; then
+        for _ in $(seq 1 5); do
+          if "$TAILSCALE" funnel status 2>&1 | grep -q "Funnel on"; then
+            break
+          fi
+          sleep 1
+        done
+      fi
+      if ! grep -qE "Funnel started|Available on the internet|Funnel on" <<<"$funnel_output"          && ! "$TAILSCALE" funnel status 2>&1 | grep -q "Funnel on"; then
+        echo "[start] could not confirm Funnel is on." >&2
+        echo "$funnel_output" | sed 's/^/  /' >&2
+        "$PROJECT_DIR/ops/stop_experiment.sh" >/dev/null 2>&1 || true
+        exit 1
+      fi
+    fi
+    PUBLIC_URL="https://$( "$TAILSCALE" status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null || echo 'see funnel status' )"
+    ;;
+  tailnet)
+    "$TAILSCALE" funnel reset >/dev/null 2>&1 || true
+    "$TAILSCALE" serve reset >/dev/null 2>&1 || true
+    "$TAILSCALE" serve --bg "$PORT"
+    PUBLIC_URL="$( "$TAILSCALE" serve status 2>&1 | grep -oE 'https?://[^ ]+' | head -1 || true )"
+    ;;
+  none)
+    "$TAILSCALE" funnel reset >/dev/null 2>&1 || true
+    "$TAILSCALE" serve reset >/dev/null 2>&1 || true
+    ;;
+  *)
+    echo "[start] unknown SMPLX_PUBLIC_MODE: $PUBLIC_MODE" >&2
     exit 1
-  fi
-fi
+    ;;
+esac
 
 echo "[start] step 6/6: verify local and public state"
 curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/healthz" >/dev/null
-"$TAILSCALE" funnel status 2>&1 | sed 's/^/  /'
-echo
 echo "[start] experiment is up (login required, WSL supervisor running)"
-echo "[start] public: https://$( "$TAILSCALE" status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null || echo 'see funnel status' )"
-echo "[start] admin : same URL + /admin"
+if [[ -n "$PUBLIC_URL" ]]; then
+  echo "[start] public: $PUBLIC_URL"
+  echo "[start] admin : ${PUBLIC_URL%/}/admin"
+else
+  echo "[start] public: none (local only)"
+fi
 echo "[start] stop  : $PROJECT_DIR/ops/stop_experiment.sh"

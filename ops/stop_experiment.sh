@@ -18,7 +18,8 @@ for task in "SMPLX Viewer Health" "SMPLX Viewer Start"; do
 done
 
 echo "[stop] stopping WSL sessions/processes"
-for session in smplx-expt smplx-supervisor smplx; do
+"$PROJECT_DIR/ops/stop_public_tunnel.sh" >/dev/null 2>&1 || true
+for session in smplx-expt smplx-supervisor smplx smplx-tunnel; do
   tmux kill-session -t "$session" >/dev/null 2>&1 || true
 done
 pids="$(pgrep -f 'smplx_tpose_server.py' 2>/dev/null || true)"

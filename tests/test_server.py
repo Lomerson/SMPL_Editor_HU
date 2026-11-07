@@ -133,3 +133,47 @@ class ServerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FailingCache:
+    def __init__(self, cache_dir):
+        self.cache_dir = Path(cache_dir)
+
+    def obj(self, _gender):
+        raise ValueError("中文错误不会击穿 HTTP reason")
+
+
+class UnicodeErrorTest(unittest.TestCase):
+    def test_unicode_error_becomes_safe_http_error(self):
+        from http.server import ThreadingHTTPServer
+        from core.access import AccessController
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = FailingCache(tmp)
+            server = ThreadingHTTPServer(
+                ("127.0.0.1", 0),
+                handler_factory(cache, access=AccessController.disabled()),
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            for _ in range(50):
+                try:
+                    probe = socket.create_connection(("127.0.0.1", server.server_address[1]), timeout=1)
+                    probe.close()
+                    break
+                except OSError:
+                    time.sleep(0.02)
+            try:
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", server.server_address[1], timeout=10
+                )
+                connection.request("GET", "/api/model/female")
+                response = connection.getresponse()
+                body = response.read()
+                connection.close()
+                self.assertEqual(response.status, 500)
+                self.assertIn(b"Internal Server Error", body)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)

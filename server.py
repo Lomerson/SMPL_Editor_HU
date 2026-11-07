@@ -11,6 +11,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 
 import numpy as np
 from http import HTTPStatus
@@ -65,6 +66,21 @@ def handler_factory(cache, access: AccessController | None = None, workspaces=No
 
         def log_message(self, *_args):
             return
+
+        def log_request(self, code="-", size="-"):
+            if not _truthy(os.environ.get("SMPLX_REQUEST_LOG"), False):
+                return
+            started = getattr(self, "_request_started", None)
+            elapsed = f"{time.perf_counter() - started:.3f}s" if started else "?"
+            print(f"[http] {self.command} {self.path} {code} {size} {elapsed}", flush=True)
+
+        def send_error_safe(self, status, message=None):
+            safe = str(message or HTTPStatus(status).phrase)
+            try:
+                safe.encode("latin-1")
+            except UnicodeEncodeError:
+                safe = HTTPStatus(status).phrase
+            super().send_error(status, safe)
 
         def _compress(self, body: bytes, content_type: str, headers=None):
             headers = dict(headers or {})
@@ -159,11 +175,11 @@ def handler_factory(cache, access: AccessController | None = None, workspaces=No
         def send_vendor(self, path: str):
             relative = path[len("/vendor/"):]
             if not relative:
-                self.send_error(HTTPStatus.NOT_FOUND)
+                self.send_error_safe(HTTPStatus.NOT_FOUND)
                 return
             candidate = (VENDOR_ROOT / relative).resolve()
             if VENDOR_ROOT not in candidate.parents or not candidate.is_file():
-                self.send_error(HTTPStatus.NOT_FOUND)
+                self.send_error_safe(HTTPStatus.NOT_FOUND)
                 return
             content_type = {
                 ".js": "text/javascript; charset=utf-8",
@@ -195,6 +211,7 @@ def handler_factory(cache, access: AccessController | None = None, workspaces=No
             )
 
         def do_GET(self):
+            self._request_started = time.perf_counter()
             path = urlparse(self.path).path
             if path == "/login":
                 self.send_login()
@@ -214,7 +231,7 @@ def handler_factory(cache, access: AccessController | None = None, workspaces=No
                     if path.startswith("/api/"):
                         self.send_unauthorized()
                         return
-                    self.send_error(HTTPStatus.UNAUTHORIZED)
+                    self.send_error_safe(HTTPStatus.UNAUTHORIZED)
                     return
             else:
                 user = "local"
@@ -249,10 +266,10 @@ def handler_factory(cache, access: AccessController | None = None, workspaces=No
                         _model, vertices, _joints, _parents = cache._geometry(gender)
                     data = np.asarray(vertices, dtype=np.float32).tobytes()
                 except FileNotFoundError:
-                    self.send_error(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
+                    self.send_error_safe(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
                     return
                 except Exception as exc:
-                    self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                    self.send_error_safe(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
                     return
                 self.send_bytes(
                     data,
@@ -266,10 +283,10 @@ def handler_factory(cache, access: AccessController | None = None, workspaces=No
                 try:
                     model_path = cache.obj(gender)
                 except FileNotFoundError:
-                    self.send_error(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
+                    self.send_error_safe(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
                     return
                 except Exception as exc:
-                    self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                    self.send_error_safe(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
                     return
                 data = model_path.read_bytes()
                 self.send_bytes(data, "text/plain; charset=utf-8", compress=True)
@@ -279,10 +296,10 @@ def handler_factory(cache, access: AccessController | None = None, workspaces=No
                 try:
                     target = cache.glb(gender)
                 except FileNotFoundError:
-                    self.send_error(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
+                    self.send_error_safe(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
                     return
                 except Exception as exc:
-                    self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                    self.send_error_safe(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
                     return
                 data = target.read_bytes()
                 self.send_response(HTTPStatus.OK)
@@ -301,10 +318,10 @@ def handler_factory(cache, access: AccessController | None = None, workspaces=No
                 try:
                     target = cache.params(gender)
                 except FileNotFoundError:
-                    self.send_error(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
+                    self.send_error_safe(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
                     return
                 except Exception as exc:
-                    self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                    self.send_error_safe(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
                     return
                 data = target.read_bytes()
                 self.send_bytes(
@@ -319,10 +336,10 @@ def handler_factory(cache, access: AccessController | None = None, workspaces=No
                 try:
                     target = cache.displacement_export(gender)
                 except FileNotFoundError:
-                    self.send_error(HTTPStatus.NOT_FOUND, "No imported displacement")
+                    self.send_error_safe(HTTPStatus.NOT_FOUND, "No imported displacement")
                     return
                 except Exception as exc:
-                    self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                    self.send_error_safe(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
                     return
                 data = target.read_bytes()
                 self.send_response(HTTPStatus.OK)
@@ -341,10 +358,10 @@ def handler_factory(cache, access: AccessController | None = None, workspaces=No
                 try:
                     target = cache.fourview(gender)
                 except FileNotFoundError:
-                    self.send_error(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
+                    self.send_error_safe(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
                     return
                 except Exception as exc:
-                    self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                    self.send_error_safe(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
                     return
                 data = target.read_bytes()
                 self.send_response(HTTPStatus.OK)
@@ -365,10 +382,10 @@ def handler_factory(cache, access: AccessController | None = None, workspaces=No
                     with zipfile.ZipFile(target) as archive:
                         data = archive.read("front.png")
                 except FileNotFoundError:
-                    self.send_error(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
+                    self.send_error_safe(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
                     return
                 except Exception as exc:
-                    self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                    self.send_error_safe(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
                     return
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "image/png")
@@ -386,19 +403,19 @@ def handler_factory(cache, access: AccessController | None = None, workspaces=No
                 try:
                     self.send_json(cache.skeleton(gender))
                 except FileNotFoundError:
-                    self.send_error(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
+                    self.send_error_safe(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
                 except Exception as exc:
-                    self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                    self.send_error_safe(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
                 return
             if path.startswith("/api/weights/"):
                 gender = path.rsplit("/", 1)[-1]
                 try:
                     data = cache.owners(gender)
                 except FileNotFoundError:
-                    self.send_error(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
+                    self.send_error_safe(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
                     return
                 except Exception as exc:
-                    self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                    self.send_error_safe(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
                     return
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "application/octet-stream")
@@ -407,7 +424,7 @@ def handler_factory(cache, access: AccessController | None = None, workspaces=No
                 self.end_headers()
                 self.wfile.write(data)
                 return
-            self.send_error(HTTPStatus.NOT_FOUND)
+            self.send_error_safe(HTTPStatus.NOT_FOUND)
 
         def _handle_reference(self):
             """Decode an uploaded picture with AnimePoseDetector, return its eyes."""
@@ -416,16 +433,16 @@ def handler_factory(cache, access: AccessController | None = None, workspaces=No
             except ValueError:
                 size = 0
             if size <= 0:
-                self.send_error(HTTPStatus.BAD_REQUEST, "empty upload")
+                self.send_error_safe(HTTPStatus.BAD_REQUEST, "empty upload")
                 return
             if size > 32 * 1024 * 1024:
-                self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "picture larger than 32 MiB")
+                self.send_error_safe(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "picture larger than 32 MiB")
                 return
             payload = self.rfile.read(size)
             try:
                 result = cache.reference_eyes(payload)
             except Exception as exc:
-                self.send_error(HTTPStatus.UNPROCESSABLE_ENTITY, f"{type(exc).__name__}: {exc}")
+                self.send_error_safe(HTTPStatus.UNPROCESSABLE_ENTITY, f"{type(exc).__name__}: {exc}")
                 return
             self.send_json(result)
 
@@ -469,7 +486,7 @@ def handler_factory(cache, access: AccessController | None = None, workspaces=No
                     result["source"] = "文件夹（上传）"
                 self.send_json(result)
             except FileNotFoundError:
-                self.send_error(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
+                self.send_error_safe(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
             except ValueError as exc:
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.UNPROCESSABLE_ENTITY)
             except Exception as exc:
@@ -485,10 +502,10 @@ def handler_factory(cache, access: AccessController | None = None, workspaces=No
             except ValueError:
                 size = 0
             if size <= 0:
-                self.send_error(HTTPStatus.BAD_REQUEST, "empty auto-fit upload")
+                self.send_error_safe(HTTPStatus.BAD_REQUEST, "empty auto-fit upload")
                 return
             if size > 64 * 1024 * 1024:
-                self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "auto-fit input larger than 64 MiB")
+                self.send_error_safe(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "auto-fit input larger than 64 MiB")
                 return
             payload = self.rfile.read(size)
             filename = self.headers.get("X-Filename", "upload")
@@ -503,7 +520,7 @@ def handler_factory(cache, access: AccessController | None = None, workspaces=No
                             return
                     result = autofit.run(cache, gender, data=payload, filename=filename)
             except FileNotFoundError:
-                self.send_error(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
+                self.send_error_safe(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
                 return
             except ValueError as exc:
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.UNPROCESSABLE_ENTITY)
@@ -523,10 +540,10 @@ def handler_factory(cache, access: AccessController | None = None, workspaces=No
             except ValueError:
                 size = 0
             if size <= 0:
-                self.send_error(HTTPStatus.BAD_REQUEST, "empty displacement upload")
+                self.send_error_safe(HTTPStatus.BAD_REQUEST, "empty displacement upload")
                 return
             if size > 16 * 1024 * 1024:
-                self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "displacement larger than 16 MiB")
+                self.send_error_safe(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "displacement larger than 16 MiB")
                 return
             payload = self.rfile.read(size)
             try:
@@ -535,7 +552,7 @@ def handler_factory(cache, access: AccessController | None = None, workspaces=No
                     raise ValueError("expected a single .npy array")
                 cache.update_displacement(gender, array)
             except Exception as exc:
-                self.send_error(HTTPStatus.UNPROCESSABLE_ENTITY, f"{type(exc).__name__}: {exc}")
+                self.send_error_safe(HTTPStatus.UNPROCESSABLE_ENTITY, f"{type(exc).__name__}: {exc}")
                 return
             self.send_json({"ok": True, "has_displacement": True})
 
@@ -638,6 +655,7 @@ def handler_factory(cache, access: AccessController | None = None, workspaces=No
             )
 
         def do_POST(self):
+            self._request_started = time.perf_counter()
             path = urlparse(self.path).path
             if path == "/api/admin/status":
                 self._handle_admin_status()
@@ -700,11 +718,11 @@ def handler_factory(cache, access: AccessController | None = None, workspaces=No
                     result = cache.replace_custom_model(gender, payload)
                     self.send_json(result)
                 except FileNotFoundError:
-                    self.send_error(HTTPStatus.NOT_FOUND, "Requested base SMPL-X gender model is not installed")
+                    self.send_error_safe(HTTPStatus.NOT_FOUND, "Requested base SMPL-X gender model is not installed")
                 except ValueError as exc:
                     self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
                 except Exception as exc:
-                    self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, f"{type(exc).__name__}: {exc}")
+                    self.send_error_safe(HTTPStatus.INTERNAL_SERVER_ERROR, f"{type(exc).__name__}: {exc}")
                 return
             if path.startswith("/api/autofit/upload/"):
                 self._handle_autofit_upload(path.rsplit("/", 1)[-1])
@@ -804,13 +822,13 @@ def handler_factory(cache, access: AccessController | None = None, workspaces=No
 #                     )
 #                     self.send_json(result)
 #                     return
-                self.send_error(HTTPStatus.NOT_FOUND)
+                self.send_error_safe(HTTPStatus.NOT_FOUND)
             except FileNotFoundError:
-                self.send_error(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
+                self.send_error_safe(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
             except (KeyError, TypeError, ValueError) as exc:
-                self.send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                self.send_error_safe(HTTPStatus.BAD_REQUEST, str(exc))
             except Exception as exc:
-                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                self.send_error_safe(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
     return Handler
 
 
