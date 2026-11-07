@@ -847,6 +847,17 @@ function parseObjGeometry(text){
   return geometry;
 }
 
+function placeOnGround(object){
+  // Box3.setFromObject() is world-space; reset the accumulated position first
+  // so a reload after posing cannot feed the previous ground offset back in.
+  object.position.y=0;
+  object.updateMatrixWorld(true);
+  const box=new THREE.Box3().setFromObject(object);
+  const min=Number.isFinite(box.min.y)?box.min.y:0;
+  object.position.y=-min;
+  object.updateMatrixWorld(true);
+  return -min;
+}
 function applySkinOpacity(){
   if(meshRoot){
     meshRoot.visible=skinOpacityLevel>0;
@@ -1047,8 +1058,7 @@ async function load(gender,edited=false,force=false){
       geometry.computeVertexNormals();
       geometry.computeBoundingBox();
       geometry.computeBoundingSphere();
-      groundOffset=.02-new THREE.Box3().setFromObject(meshRoot).min.y;
-      meshRoot.position.y=groundOffset;
+      groundOffset=placeOnGround(meshRoot);
       meshRoot.userData.gender=gender;
     }else{
       if(meshRoot)scene.remove(meshRoot);
@@ -1056,8 +1066,7 @@ async function load(gender,edited=false,force=false){
       const obj=new THREE.Mesh(parseObjGeometry(meshText),material);
       obj.userData.gender=gender;
       meshRoot=obj;
-      groundOffset=.02-new THREE.Box3().setFromObject(obj).min.y;
-      obj.position.y=groundOffset;
+      groundOffset=placeOnGround(obj);
       scene.add(obj);
     }
     paintMesh();
