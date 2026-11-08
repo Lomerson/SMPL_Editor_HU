@@ -145,11 +145,11 @@ function applyExperimentMode(){
   });
   const fourView=document.querySelector('#export-fourview');
   if(fourView){
-    fourView.textContent='正视图';
-    fourView.title='下载正视图 PNG';
+    fourView.textContent='正视图 + GLB';
+    fourView.title='下载正视图 PNG 和当前模型 GLB（zip）';
   }
   const help=document.querySelector('#export-help');
-  if(help)help.textContent='实验模式：只保留正视图导出；本次实验跳过 Blender/GLB/位移步骤。';
+  if(help)help.textContent='实验模式：导出正视图 PNG + 当前模型 GLB（zip）；跳过参数/位移步骤。';
   const fitInfo=document.querySelector('#fit-info');
   if(fitInfo)fitInfo.textContent='支持：单张正+侧组合图 / zip / tar.gz / tgz / 单张正视图。文件名不用于判断正/侧。';
   const logout=document.querySelector('#logout-btn');
@@ -1194,8 +1194,8 @@ exportParams.onclick=()=>{if(!selected)return;setStatus('正在导出 identity �
 exportFourview.onclick=()=>{
   if(!selected)return;
   if(EXPERIMENT_MODE){
-    setStatus('正在导出正视图...');
-    window.location.href='/api/export/front/'+selected;
+    setStatus('正在导出正视图 + GLB...');
+    window.location.href='/api/export/frontglb/'+selected;
   }else{
     setStatus('正在导出四视图（正/背/左/右）...');
     window.location.href='/api/export/fourview/'+selected;

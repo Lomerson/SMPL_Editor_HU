@@ -375,6 +375,31 @@ def handler_factory(cache, access: AccessController | None = None, workspaces=No
                 self.end_headers()
                 self.wfile.write(data)
                 return
+            if path.startswith("/api/export/frontglb/"):
+                gender = path.rsplit("/", 1)[-1]
+                try:
+                    front_zip = cache.fourview(gender)
+                    glb_target = cache.glb(gender)
+                    with zipfile.ZipFile(front_zip) as archive:
+                        front_data = archive.read("front.png")
+                    buffer = io.BytesIO()
+                    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+                        archive.writestr(f"front_{gender}.png", front_data)
+                        archive.writestr(glb_target.name, glb_target.read_bytes())
+                    data = buffer.getvalue()
+                except FileNotFoundError:
+                    self.send_error_safe(HTTPStatus.NOT_FOUND, "Requested SMPL-X gender model is not installed")
+                    return
+                except Exception as exc:
+                    self.send_error_safe(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                    return
+                self.send_bytes(
+                    data,
+                    "application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="front_{gender}_glb.zip"'},
+                    compress=False,
+                )
+                return
             if path.startswith("/api/export/front/"):
                 gender = path.rsplit("/", 1)[-1]
                 try:
